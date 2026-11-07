@@ -162,7 +162,8 @@ export const planGroup = (members, F, opt) => candidates(members, F, opt)[0] ?? 
 
 // Rebuilds a plan from a tuning file: [{F, members: [names], T, S, P, Q}] per net.
 export function planFromTuned(net, tuned, opt) {
-  const list = tuned.map(t => {
+  const covered = new Set(tuned.flatMap(t => t.members));
+  const list = tuned.filter(t => net.nodes.has(t.F)).map(t => {
     const members = new Set(t.members.map(n => net.nodes.get(n)));
     const F = net.nodes.get(t.F);
     if (!F || [...members].some(m => !m)) throw new Error('tuning file does not match this net');
@@ -170,6 +171,13 @@ export function planFromTuned(net, tuned, opt) {
     if (!plan) throw new Error(`tuned config for ${t.F} is not feasible here`);
     return { members, F, plan };
   });
+  // Live ops the tuning file doesn't cover (e.g. extra outputs requested) get heuristic single-op kernels.
+  for (const n of net.order) {
+    if (n.op === 'data' || covered.has(n.name)) continue;
+    const members = new Set([n]), plan = planGroup(members, n, opt);
+    if (!plan) throw new Error(`no feasible plan for ${n.name}`);
+    list.push({ members, F: n, plan });
+  }
   return levelize(list);
 }
 

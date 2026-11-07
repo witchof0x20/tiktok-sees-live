@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>What TikTok sees, live</title>
+<meta name="description" content="Live webcam version of What TikTok sees: TikTok's decoded face nets on a fused WebGPU engine, on your device.">
+<meta name="color-scheme" content="light dark">
+<link rel="stylesheet" href="app.css">
+<script type="module" src="app.js"></script>
+</head>
+<body>
+<main>
+  <header>
+    <h1>What TikTok sees <span>live</span></h1>
+    <p>Runs on your device. Nothing is uploaded.</p>
+  </header>
+  <section class="stage" id="stage" data-state="idle">
+    <video id="video" playsinline muted></video>
+    <canvas id="overlay"></canvas>
+    <div class="cover" id="cover">
+      <button type="button" id="start">Start camera</button>
+      <p id="status" role="status"></p>
+    </div>
+  </section>
+  <section class="controls" aria-label="Options">
+    <label>Camera <select id="res">
+      <option value="640x480">640×480</option>
+      <option value="1280x720" selected>1280×720</option>
+      <option value="1920x1080">1920×1080</option>
+    </select></label>
+    <label>Faces <select id="faces">
+      <option>1</option><option>2</option><option selected>4</option>
+    </select></label>
+    <label><input type="checkbox" id="mesh" checked> Landmarks</label>
+    <label><input type="checkbox" id="crops" checked> Net inputs</label>
+    <label><input type="checkbox" id="mirror" checked> Mirror</label>
+  </section>
+  <section class="hud" id="hud" aria-label="Performance" hidden>
+    <div><dt>Camera</dt><dd id="fpsCam">–</dd></div>
+    <div><dt>Face finder</dt><dd id="msDet">–</dd></div>
+    <div><dt>Nets (GPU)</dt><dd id="msNet">–</dd></div>
+    <div><dt>Scored</dt><dd id="fpsNet">–</dd></div>
+    <div class="wide"><dt>Engine</dt><dd id="engine">–</dd></div>
+  </section>
+  <p class="foot">Based on <a href="/upstream/tools/tiktok-face/">ayoships.com/tools/tiktok-face</a> · not affiliated with TikTok</p>
+</main>
+</body>
+</html>

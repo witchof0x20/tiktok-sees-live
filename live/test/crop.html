@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>GPU crop check</title>
+<style>body{font:14px/1.4 ui-monospace,monospace;margin:16px;background:#111;color:#ddd}pre{white-space:pre-wrap}</style>
+<script src="/upstream/tools/tiktok-face/engine.js"></script>
+<script type="module">
+// The live path crops on the GPU from a texture; upstream crops with canvas drawImage. Compare final scores
+// on the same face for several scales/rotations (including ones that hit the mip path).
+import { requestDevice, createEngine, expScores, ageScores } from '../gpu/engine.js';
+import { FrameTexture, EXP, AGE, cropParams } from '../gpu/frame.js';
+import { makePhoto, drawCrop, findFaces } from '/upstream/tools/tiktok-face/face.js';
+const BASE = '/upstream/tools/tiktok-face/', el = document.getElementById('log'), log = t => { el.textContent += t + '\n'; };
+const WANT = { expnet: ['predict_attractive', 'prob_exp', 'predict_valence', 'predict_arousal'], agenet: ['predict_age', 'prob_gender'] };
+const load = async name => { const [spec, buf] = await Promise.all([fetch(BASE + name + '.json').then(r => r.json()), fetch(BASE + name + '.bin').then(r => r.arrayBuffer())]); return { spec, buf, wanted: WANT[name] }; };
+function tensorOf(t, p, e, m) {
+  const c = document.createElement('canvas'); c.width = c.height = t.S; const x = c.getContext('2d', { willReadFrequently: true }); drawCrop(x, t.S, t, p, e, m);
+  const d = x.getImageData(0, 0, t.S, t.S).data, o = new Int16Array(t.S * t.S * 3);
+  for (let i = 0; i < t.S * t.S; i++) { o[i * 3] = d[i * 4 + 2] - 128; o[i * 3 + 1] = d[i * 4 + 1] - 128; o[i * 3 + 2] = d[i * 4] - 128; }
+  return o;
+}
+try {
+  const { device } = await requestDevice();
+  const specs = await Promise.all([load('expnet'), load('agenet')]);
+  const ref = specs.map(s => new self.FaceNet.Net(s.spec, s.buf));
+  const eng = await createEngine(device, specs, { maxBatch: 1, source: 'texture' });
+  const frame = new FrameTexture(device);
+  const img = new Image(); img.src = BASE + 'sample.jpg'; await img.decode();
+  const worst = { attractive: 0, age: 0, boy: 0, exp: 0 };
+  for (const [scale, deg] of [[1, 0], [0.5, 0], [0.25, 0], [0.12, 0], [1, 20], [0.6, -35], [1.5, 0]]) {
+    // Render the photo at this scale/rotation into a canvas that stands in for a camera frame.
+    const W = Math.round(1024 * Math.max(scale, 0.3) * 1.4), c = document.createElement('canvas'); c.width = W; c.height = Math.round(W * 0.75);
+    const x = c.getContext('2d'); x.fillStyle = '#556'; x.fillRect(0, 0, c.width, c.height);
+    x.translate(c.width / 2, c.height / 2); x.rotate(deg * Math.PI / 180); x.drawImage(img, -512 * scale, -512 * scale, 1024 * scale, 1024 * scale);
+    const photo = makePhoto(c), [f] = await findFaces(photo);
+    if (!f) { log(`scale ${scale} rot ${deg}: no face`); continue; }
+    const R = { ...self.FaceNet.expScores(ref[0].run(tensorOf(EXP, photo, f.e, f.m))), ...self.FaceNet.ageScores(ref[1].run(tensorOf(AGE, photo, f.e, f.m))) };
+    const bmp = await createImageBitmap(c);
+    frame.upload(bmp, c.width, c.height);
+    const cr = [cropParams(EXP, c.width, c.height, f.e, f.m), cropParams(AGE, c.width, c.height, f.e, f.m)];
+    const lvl = Math.max(cr[0].lvl, cr[1].lvl);
+    const { res } = await eng.runFrame(frame.view, [cr], enc => frame.mips(enc, lvl));
+    const G = { ...expScores(res[0][0]), ...ageScores(res[0][1]) };
+    const d = { attractive: Math.abs(G.attractive - R.attractive), age: Math.abs(G.age - R.age), boy: Math.abs(G.boy - R.boy), exp: Math.max(...G.exp.map((v, i) => Math.abs(v - R.exp[i]))) };
+    for (const k in worst) worst[k] = Math.max(worst[k], d[k]);
+    log(`scale ${String(scale).padEnd(4)} rot ${String(deg).padStart(3)} mip ${lvl}: attractive canvas ${R.attractive.toFixed(2)} gpu ${G.attractive.toFixed(2)} | age ${R.age.toFixed(1)} / ${G.age.toFixed(1)} | male ${R.boy.toFixed(3)} / ${G.boy.toFixed(3)} | max mood diff ${(d.exp * 100).toFixed(1)}pt`);
+  }
+  log(`worst: attractive ${worst.attractive.toFixed(2)}, age ${worst.age.toFixed(2)}, male prob ${worst.boy.toFixed(3)}, mood ${(worst.exp * 100).toFixed(1)}pt`);
+  window.__crop = worst;
+} catch (e) { log(String(e.stack || e)); window.__crop = { error: String(e) }; }
+</script></head>
+<body><pre id="log"></pre></body>
+</html>

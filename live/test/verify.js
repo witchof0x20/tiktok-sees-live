@@ -35,7 +35,8 @@ const same = (a, b) => a.length === b.length && a.every((v, i) => Object.is(v, b
     const specs = await Promise.all([load('expnet'), load('agenet')]);
     const ref = specs.map(s => new self.FaceNet.Net(s.spec, s.buf));
     const opt = JSON.parse(new URLSearchParams(location.search).get('opt') || '{}');
-    const eng = await createEngine(device, specs, { maxBatch: 8, source: 'tensor', opt });
+    const tuned = new URLSearchParams(location.search).get('tuned') ? await fetch(`../tuned/${info.architecture}.json`).then(r => r.json()) : null;
+    const eng = await createEngine(device, specs, { maxBatch: 8, source: 'tensor', opt, tuned });
     log(`compiled ${eng.kernelCount} kernels into ${eng.dispatches} dispatches in ${eng.compileMs.toFixed(0)} ms; arena ${(eng.arenaBytes / 1024).toFixed(0)} KiB, weights ${(eng.weightBytes / 1024).toFixed(0)} KiB`);
 
     const cases = [];

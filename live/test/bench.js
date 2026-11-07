@@ -1,9 +1,10 @@
 // Benchmarks: reference CPU engine vs fused GPU engine. Query: ?opt={...planner overrides}&batch=1&ref=0
 import { requestDevice, createEngine } from '../gpu/engine.js';
+import { FrameTexture, EXP, AGE, cropParams } from '../gpu/frame.js';
 
 const BASE = '/upstream/tools/tiktok-face/';
 const q = new URLSearchParams(location.search);
-const opt = JSON.parse(q.get('opt') || '{}'), batch = +(q.get('batch') || 1), runRef = q.get('ref') !== '0', iters = +(q.get('iters') || 200);
+const useTuned = !!q.get('tuned'), opt = JSON.parse(q.get('opt') || '{}'), batch = +(q.get('batch') || 1), runRef = q.get('ref') !== '0', iters = +(q.get('iters') || 200);
 const lines = [];
 const log = t => { lines.push(t); document.getElementById('log').textContent = lines.join('\n'); console.log(t); };
 const WANT = { expnet: ['predict_attractive', 'prob_exp', 'predict_valence', 'predict_arousal'], agenet: ['predict_age', 'prob_gender'] };
@@ -26,9 +27,23 @@ const median = a => { const b = [...a].sort((x, y) => x - y); return b[b.length 
       out.refMs = median(t);
       log(`reference JS engine, both nets, 1 face: ${out.refMs.toFixed(1)} ms`);
     }
-    const eng = await createEngine(device, specs, { maxBatch: Math.max(batch, 1), source: 'tensor', opt });
+    const tuned = useTuned ? await fetch(`../tuned/${info.architecture}.json`).then(r => r.json()) : null;
+    const eng = await createEngine(device, specs, { maxBatch: Math.max(batch, 1), source: 'tensor', opt, tuned });
     out.kernels = eng.kernelCount; out.dispatches = eng.dispatches; out.compileMs = eng.compileMs;
     log(`${eng.kernelCount} kernels / ${eng.dispatches} dispatches, compiled in ${eng.compileMs.toFixed(0)} ms`);
+    // Live path: crop from a video-sized texture on the GPU (same as the webcam loop), unless ?path=tensor.
+    let run = () => eng.runTensors(inputs);
+    if (q.get('path') !== 'tensor') {
+      eng.destroy();
+      const live = await createEngine(device, specs, { maxBatch: Math.max(batch, 1), source: 'texture', opt, tuned });
+      const frame = new FrameTexture(device), img = new Image(); img.src = BASE + 'sample.jpg'; await img.decode();
+      const bmp = await createImageBitmap(img, { resizeWidth: 1280, resizeHeight: 720 });
+      frame.upload(bmp, 1280, 720);
+      const crops = Array.from({ length: batch }, (_, b) => { const e = [500 + 60 * b, 300], m = [505 + 60 * b, 420]; return [cropParams(EXP, 1280, 720, e, m), cropParams(AGE, 1280, 720, e, m)]; });
+      run = () => live.runFrame(frame.view, crops);
+      Object.assign(eng, { runTensors: run, destroy: () => live.destroy() });
+      log('path: texture crop (live)');
+    }
     for (let i = 0; i < 30; i++) await eng.runTensors(inputs);
     const lat = [];
     for (let i = 0; i < iters; i++) { const t0 = performance.now(); await eng.runTensors(inputs); lat.push(performance.now() - t0); }
@@ -46,7 +61,7 @@ const median = a => { const b = [...a].sort((x, y) => x - y); return b[b.length 
     log(`GPU pipelined: ${out.thrMs.toFixed(3)} ms per batch (${(1000 / out.thrMs).toFixed(0)} batches/s)`);
     eng.destroy();
 
-    const prof = await createEngine(device, specs, { maxBatch: Math.max(batch, 1), source: 'tensor', opt, profile: true });
+    const prof = await createEngine(device, specs, { maxBatch: Math.max(batch, 1), source: 'tensor', opt, profile: true, tuned });
     if (prof.canTime) {
       const acc = prof.stages.map(() => []);
       for (let i = 0; i < 60; i++) { const r = await prof.runTensors(inputs); r.times.forEach((t, j) => acc[j].push(t)); }

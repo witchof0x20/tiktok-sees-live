@@ -1,0 +1,1072 @@
+{
+ "opt": {
+  "wg": 128,
+  "u24": true
+ },
+ "nets": {
+  "expnet": [
+   {
+    "F": "sharelayer.0",
+    "members": [
+     "sharelayer.0"
+    ],
+    "T": 16,
+    "S": 2,
+    "P": 1,
+    "Q": 2,
+    "sched": "px",
+    "us": 31.57
+   },
+   {
+    "F": "sharelayer.3.0.add",
+    "members": [
+     "sharelayer.3.0.conv1",
+     "sharelayer.3.0.conv2",
+     "sharelayer.3.0.add"
+    ],
+    "T": 8,
+    "S": 1,
+    "P": 2,
+    "Q": 1,
+    "sched": "unit",
+    "us": 23.84
+   },
+   {
+    "F": "sharelayer.3.1.add",
+    "members": [
+     "sharelayer.3.1.conv1",
+     "sharelayer.3.1.conv2",
+     "sharelayer.3.1.add"
+    ],
+    "T": 8,
+    "S": 1,
+    "P": 2,
+    "Q": 1,
+    "sched": "unit",
+    "us": 23.77
+   },
+   {
+    "F": "sharelayer.3.2.add",
+    "members": [
+     "sharelayer.3.2.conv1",
+     "sharelayer.3.2.conv2",
+     "sharelayer.3.2.add"
+    ],
+    "T": 8,
+    "S": 1,
+    "P": 2,
+    "Q": 1,
+    "sched": "unit",
+    "us": 23.43
+   },
+   {
+    "F": "sharelayer.4.0.add",
+    "members": [
+     "sharelayer.4.0.conv1",
+     "sharelayer.4.0.conv2",
+     "sharelayer.4.0.downsample.0",
+     "sharelayer.4.0.add"
+    ],
+    "T": 4,
+    "S": 1,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 17.74
+   },
+   {
+    "F": "sharelayer.4.1.add",
+    "members": [
+     "sharelayer.4.1.conv1",
+     "sharelayer.4.1.conv2",
+     "sharelayer.4.1.add"
+    ],
+    "T": 4,
+    "S": 1,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 16.5
+   },
+   {
+    "F": "sharelayer.4.2.add",
+    "members": [
+     "sharelayer.4.2.conv1",
+     "sharelayer.4.2.conv2",
+     "sharelayer.4.2.add"
+    ],
+    "T": 4,
+    "S": 1,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 16.25
+   },
+   {
+    "F": "sharelayer.5.0.add",
+    "members": [
+     "sharelayer.5.0.conv1",
+     "sharelayer.5.0.conv2",
+     "sharelayer.5.0.downsample.0",
+     "sharelayer.5.0.add"
+    ],
+    "T": 4,
+    "S": 2,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 15.07
+   },
+   {
+    "F": "sharelayer.5.1.add",
+    "members": [
+     "sharelayer.5.1.conv1",
+     "sharelayer.5.1.conv2",
+     "sharelayer.5.1.add"
+    ],
+    "T": 4,
+    "S": 1,
+    "P": 2,
+    "Q": 1,
+    "sched": "unit",
+    "us": 13.34
+   },
+   {
+    "F": "sharelayer.5.2.add",
+    "members": [
+     "sharelayer.5.2.conv1",
+     "sharelayer.5.2.conv2",
+     "sharelayer.5.2.add"
+    ],
+    "T": 4,
+    "S": 1,
+    "P": 2,
+    "Q": 1,
+    "sched": "unit",
+    "us": 13.53
+   },
+   {
+    "F": "sharelayer.5.3.add",
+    "members": [
+     "sharelayer.5.3.conv1",
+     "sharelayer.5.3.conv2",
+     "sharelayer.5.3.add"
+    ],
+    "T": 4,
+    "S": 1,
+    "P": 2,
+    "Q": 1,
+    "sched": "unit",
+    "us": 13.7
+   },
+   {
+    "F": "expshare.0.0.add",
+    "members": [
+     "expshare.0.0.conv1",
+     "expshare.0.0.conv2",
+     "expshare.0.0.add"
+    ],
+    "T": 4,
+    "S": 1,
+    "P": 2,
+    "Q": 1,
+    "sched": "unit",
+    "us": 13.28
+   },
+   {
+    "F": "expshare.0.1.add",
+    "members": [
+     "expshare.0.1.conv1",
+     "expshare.0.1.conv2",
+     "expshare.0.1.add"
+    ],
+    "T": 4,
+    "S": 1,
+    "P": 2,
+    "Q": 1,
+    "sched": "unit",
+    "us": 13.56
+   },
+   {
+    "F": "expshare.1.0.add",
+    "members": [
+     "expshare.1.0.conv1",
+     "expshare.1.0.conv2",
+     "expshare.1.0.downsample.0",
+     "expshare.1.0.add"
+    ],
+    "T": 2,
+    "S": 1,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 15.21
+   },
+   {
+    "F": "layer_exp_seven.0.add",
+    "members": [
+     "layer_exp_seven.0.conv1",
+     "layer_exp_seven.0.conv2",
+     "layer_exp_seven.0.add"
+    ],
+    "T": 2,
+    "S": 1,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 12.57
+   },
+   {
+    "F": "layer_exp_seven.1.add",
+    "members": [
+     "layer_exp_seven.1.conv1",
+     "layer_exp_seven.1.conv2",
+     "layer_exp_seven.1.add"
+    ],
+    "T": 2,
+    "S": 1,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 12.93
+   },
+   {
+    "F": "layer_exp_seven.2.add",
+    "members": [
+     "layer_exp_seven.2.conv1",
+     "layer_exp_seven.2.conv2",
+     "layer_exp_seven.2.add"
+    ],
+    "T": 2,
+    "S": 1,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 13.38
+   },
+   {
+    "F": "layer_exp_seven.3.add",
+    "members": [
+     "layer_exp_seven.3.conv1",
+     "layer_exp_seven.3.conv2",
+     "layer_exp_seven.3.add"
+    ],
+    "T": 2,
+    "S": 1,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 13.71
+   },
+   {
+    "F": "layer_attractive1.0.add",
+    "members": [
+     "layer_attractive1.0.conv1",
+     "layer_attractive1.0.conv2",
+     "layer_attractive1.0.add"
+    ],
+    "T": 4,
+    "S": 1,
+    "P": 2,
+    "Q": 1,
+    "sched": "unit",
+    "us": 13.79
+   },
+   {
+    "F": "layer_attractive1.1.add",
+    "members": [
+     "layer_attractive1.1.conv1",
+     "layer_attractive1.1.conv2",
+     "layer_attractive1.1.add"
+    ],
+    "T": 4,
+    "S": 1,
+    "P": 2,
+    "Q": 1,
+    "sched": "unit",
+    "us": 13.22
+   },
+   {
+    "F": "layer_attractive2.0.add",
+    "members": [
+     "layer_attractive2.0.conv1",
+     "layer_attractive2.0.conv2",
+     "layer_attractive2.0.downsample.0",
+     "layer_attractive2.0.add"
+    ],
+    "T": 2,
+    "S": 1,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 14.71
+   },
+   {
+    "F": "layer_attractive2.1.add",
+    "members": [
+     "layer_attractive2.1.conv1",
+     "layer_attractive2.1.conv2",
+     "layer_attractive2.1.add"
+    ],
+    "T": 2,
+    "S": 1,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 13.3
+   },
+   {
+    "F": "layer_attractive2.2.add",
+    "members": [
+     "layer_attractive2.2.conv1",
+     "layer_attractive2.2.conv2",
+     "layer_attractive2.2.add"
+    ],
+    "T": 2,
+    "S": 1,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 13.07
+   },
+   {
+    "F": "layer_attractive2.3.add",
+    "members": [
+     "layer_attractive2.3.conv1",
+     "layer_attractive2.3.conv2",
+     "layer_attractive2.3.add"
+    ],
+    "T": 2,
+    "S": 1,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 13.94
+   },
+   {
+    "F": "layer_attractive2.4.add",
+    "members": [
+     "layer_attractive2.4.conv1",
+     "layer_attractive2.4.conv2",
+     "layer_attractive2.4.add"
+    ],
+    "T": 2,
+    "S": 1,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 13.55
+   }
+  ],
+  "agenet": [
+   {
+    "F": "0.first_conv.conv",
+    "members": [
+     "0.first_conv.conv"
+    ],
+    "T": 16,
+    "S": 1,
+    "P": 1,
+    "Q": 4,
+    "sched": "px",
+    "us": 109.08
+   },
+   {
+    "F": "0.features.0.conv.0.primary_conv.0",
+    "members": [
+     "0.features.0.conv.0.primary_conv.0"
+    ],
+    "T": 16,
+    "S": 1,
+    "P": 1,
+    "Q": 4,
+    "sched": "px",
+    "us": 27.2
+   },
+   {
+    "F": "0.features.0.conv.3.primary_conv.0",
+    "members": [
+     "0.features.0.conv.0.cheap_operation.0",
+     "0.features.0.conv.0.concat",
+     "0.features.0.conv.1.0",
+     "0.features.0.conv.3.primary_conv.0"
+    ],
+    "T": 7,
+    "S": 1,
+    "P": 2,
+    "Q": 1,
+    "sched": "unit",
+    "us": 114.05
+   },
+   {
+    "F": "0.features.0.eltwise",
+    "members": [
+     "0.features.0.conv.3.cheap_operation.0",
+     "0.features.0.conv.3.concat",
+     "0.features.0.shortcut.0.0",
+     "0.features.0.shortcut.1",
+     "0.features.0.eltwise"
+    ],
+    "T": 8,
+    "S": 1,
+    "P": 2,
+    "Q": 1,
+    "sched": "unit",
+    "us": 38.91
+   },
+   {
+    "F": "0.features.1.conv.0.primary_conv.0",
+    "members": [
+     "0.features.1.conv.0.primary_conv.0"
+    ],
+    "T": 16,
+    "S": 2,
+    "P": 1,
+    "Q": 2,
+    "sched": "px",
+    "us": 14.71
+   },
+   {
+    "F": "0.features.1.conv.3.primary_conv.0",
+    "members": [
+     "0.features.1.conv.0.cheap_operation.0",
+     "0.features.1.conv.0.concat",
+     "0.features.1.conv.3.primary_conv.0"
+    ],
+    "T": 16,
+    "S": 1,
+    "P": 1,
+    "Q": 4,
+    "sched": "px",
+    "us": 22.68
+   },
+   {
+    "F": "0.features.1.eltwise",
+    "members": [
+     "0.features.1.conv.3.cheap_operation.0",
+     "0.features.1.conv.3.concat",
+     "0.features.1.eltwise"
+    ],
+    "T": 8,
+    "S": 2,
+    "P": 2,
+    "Q": 1,
+    "sched": "unit",
+    "us": 22.36
+   },
+   {
+    "F": "0.features.2.conv.0.primary_conv.0",
+    "members": [
+     "0.features.2.conv.0.primary_conv.0"
+    ],
+    "T": 16,
+    "S": 4,
+    "P": 1,
+    "Q": 4,
+    "sched": "px",
+    "us": 35.27
+   },
+   {
+    "F": "0.features.2.conv.0.concat",
+    "members": [
+     "0.features.2.conv.0.cheap_operation.0",
+     "0.features.2.conv.0.concat"
+    ],
+    "T": 8,
+    "S": 1,
+    "P": 4,
+    "Q": 1,
+    "sched": "unit",
+    "us": 66.31
+   },
+   {
+    "F": "0.features.2.conv.3.primary_conv.0",
+    "members": [
+     "0.features.2.conv.1.0",
+     "0.features.2.conv.3.primary_conv.0"
+    ],
+    "T": 4,
+    "S": 1,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 63.43
+   },
+   {
+    "F": "0.features.2.eltwise",
+    "members": [
+     "0.features.2.conv.3.cheap_operation.0",
+     "0.features.2.conv.3.concat",
+     "0.features.2.shortcut.0.0",
+     "0.features.2.shortcut.1",
+     "0.features.2.eltwise"
+    ],
+    "T": 4,
+    "S": 1,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 26.69
+   },
+   {
+    "F": "0.features.3.conv.0.primary_conv.0",
+    "members": [
+     "0.features.3.conv.0.primary_conv.0"
+    ],
+    "T": 4,
+    "S": 1,
+    "P": 2,
+    "Q": 1,
+    "sched": "unit",
+    "us": 20.78
+   },
+   {
+    "F": "0.features.3.conv.0.cheap_operation.0",
+    "members": [
+     "0.features.3.conv.0.cheap_operation.0"
+    ],
+    "T": 4,
+    "S": 1,
+    "P": 2,
+    "Q": 1,
+    "sched": "unit",
+    "us": 12.51
+   },
+   {
+    "F": "0.features.3.conv.3.primary_conv.0",
+    "members": [
+     "0.features.3.conv.0.concat",
+     "0.features.3.conv.3.primary_conv.0"
+    ],
+    "T": 4,
+    "S": 1,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 24.46
+   },
+   {
+    "F": "0.features.3.eltwise",
+    "members": [
+     "0.features.3.conv.3.cheap_operation.0",
+     "0.features.3.conv.3.concat",
+     "0.features.3.eltwise"
+    ],
+    "T": 4,
+    "S": 2,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 11.21
+   },
+   {
+    "F": "0.features.4.conv.0.primary_conv.0",
+    "members": [
+     "0.features.4.conv.0.primary_conv.0"
+    ],
+    "T": 4,
+    "S": 1,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 11.58
+   },
+   {
+    "F": "0.features.4.conv.0.cheap_operation.0",
+    "members": [
+     "0.features.4.conv.0.cheap_operation.0"
+    ],
+    "T": 7,
+    "S": 2,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 7.35
+   },
+   {
+    "F": "0.features.4.conv.3.primary_conv.0",
+    "members": [
+     "0.features.4.conv.0.concat",
+     "0.features.4.conv.3.primary_conv.0"
+    ],
+    "T": 4,
+    "S": 1,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 12.09
+   },
+   {
+    "F": "0.features.4.eltwise",
+    "members": [
+     "0.features.4.conv.3.cheap_operation.0",
+     "0.features.4.conv.3.concat",
+     "0.features.4.eltwise"
+    ],
+    "T": 4,
+    "S": 1,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 11.11
+   },
+   {
+    "F": "0.features.5.conv.0.primary_conv.0",
+    "members": [
+     "0.features.5.conv.0.primary_conv.0"
+    ],
+    "T": 7,
+    "S": 2,
+    "P": 2,
+    "Q": 1,
+    "sched": "unit",
+    "us": 26.38
+   },
+   {
+    "F": "0.features.5.conv.0.cheap_operation.0",
+    "members": [
+     "0.features.5.conv.0.cheap_operation.0"
+    ],
+    "T": 7,
+    "S": 2,
+    "P": 4,
+    "Q": 1,
+    "sched": "unit",
+    "us": 18.93
+   },
+   {
+    "F": "0.features.5.conv.1.0",
+    "members": [
+     "0.features.5.conv.0.concat",
+     "0.features.5.conv.1.0"
+    ],
+    "T": 7,
+    "S": 4,
+    "P": 2,
+    "Q": 1,
+    "sched": "unit",
+    "us": 14.87
+   },
+   {
+    "F": "0.features.5.conv.3.primary_conv.0",
+    "members": [
+     "0.features.5.conv.3.primary_conv.0"
+    ],
+    "T": 7,
+    "S": 8,
+    "P": 1,
+    "Q": 1,
+    "sched": "px",
+    "us": 21.08
+   },
+   {
+    "F": "0.features.5.conv.3.cheap_operation.0",
+    "members": [
+     "0.features.5.conv.3.cheap_operation.0"
+    ],
+    "T": 7,
+    "S": 4,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 3.6
+   },
+   {
+    "F": "0.features.5.shortcut.0.0",
+    "members": [
+     "0.features.5.shortcut.0.0"
+    ],
+    "T": 4,
+    "S": 2,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 5.9
+   },
+   {
+    "F": "0.features.5.shortcut.1",
+    "members": [
+     "0.features.5.shortcut.1"
+    ],
+    "T": 8,
+    "S": 8,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 8.58
+   },
+   {
+    "F": "0.features.5.eltwise",
+    "members": [
+     "0.features.5.conv.3.concat",
+     "0.features.5.eltwise"
+    ],
+    "T": 4,
+    "S": 1,
+    "P": 1,
+    "Q": 2,
+    "sched": "unit",
+    "us": 3.36
+   },
+   {
+    "F": "0.features.6.conv.0.primary_conv.0",
+    "members": [
+     "0.features.6.conv.0.primary_conv.0"
+    ],
+    "T": 2,
+    "S": 1,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 14.77
+   },
+   {
+    "F": "0.features.6.conv.0.concat",
+    "members": [
+     "0.features.6.conv.0.cheap_operation.0",
+     "0.features.6.conv.0.concat"
+    ],
+    "T": 2,
+    "S": 2,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 9.33
+   },
+   {
+    "F": "0.features.6.conv.3.primary_conv.0",
+    "members": [
+     "0.features.6.conv.3.primary_conv.0"
+    ],
+    "T": 7,
+    "S": 8,
+    "P": 1,
+    "Q": 1,
+    "sched": "px",
+    "us": 27.47
+   },
+   {
+    "F": "0.features.6.eltwise",
+    "members": [
+     "0.features.6.conv.3.cheap_operation.0",
+     "0.features.6.conv.3.concat",
+     "0.features.6.eltwise"
+    ],
+    "T": 7,
+    "S": 8,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 4.4
+   },
+   {
+    "F": "0.features.7.conv.0.primary_conv.0",
+    "members": [
+     "0.features.7.conv.0.primary_conv.0"
+    ],
+    "T": 2,
+    "S": 1,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 14.85
+   },
+   {
+    "F": "0.features.7.conv.0.concat",
+    "members": [
+     "0.features.7.conv.0.cheap_operation.0",
+     "0.features.7.conv.0.concat"
+    ],
+    "T": 2,
+    "S": 2,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 10.63
+   },
+   {
+    "F": "0.features.7.conv.3.primary_conv.0",
+    "members": [
+     "0.features.7.conv.3.primary_conv.0"
+    ],
+    "T": 8,
+    "S": 4,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 31.04
+   },
+   {
+    "F": "0.features.7.eltwise",
+    "members": [
+     "0.features.7.conv.3.cheap_operation.0",
+     "0.features.7.conv.3.concat",
+     "0.features.7.eltwise"
+    ],
+    "T": 8,
+    "S": 8,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 4.53
+   },
+   {
+    "F": "0.features.8.conv.0.primary_conv.0",
+    "members": [
+     "0.features.8.conv.0.primary_conv.0"
+    ],
+    "T": 2,
+    "S": 1,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 14.63
+   },
+   {
+    "F": "0.features.8.conv.0.concat",
+    "members": [
+     "0.features.8.conv.0.cheap_operation.0",
+     "0.features.8.conv.0.concat"
+    ],
+    "T": 2,
+    "S": 2,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 9.3
+   },
+   {
+    "F": "0.features.8.conv.3.primary_conv.0",
+    "members": [
+     "0.features.8.conv.3.primary_conv.0"
+    ],
+    "T": 4,
+    "S": 1,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 23.15
+   },
+   {
+    "F": "0.features.8.eltwise",
+    "members": [
+     "0.features.8.conv.3.cheap_operation.0",
+     "0.features.8.conv.3.concat",
+     "0.features.8.eltwise"
+    ],
+    "T": 8,
+    "S": 8,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 4.63
+   },
+   {
+    "F": "0.features.9.conv.0.primary_conv.0",
+    "members": [
+     "0.features.9.conv.0.primary_conv.0"
+    ],
+    "T": 2,
+    "S": 1,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 13.81
+   },
+   {
+    "F": "0.features.9.conv.0.concat",
+    "members": [
+     "0.features.9.conv.0.cheap_operation.0",
+     "0.features.9.conv.0.concat"
+    ],
+    "T": 2,
+    "S": 2,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 9.31
+   },
+   {
+    "F": "0.features.9.conv.3.primary_conv.0",
+    "members": [
+     "0.features.9.conv.3.primary_conv.0"
+    ],
+    "T": 4,
+    "S": 1,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 23.26
+   },
+   {
+    "F": "0.features.9.eltwise",
+    "members": [
+     "0.features.9.conv.3.cheap_operation.0",
+     "0.features.9.conv.3.concat",
+     "0.features.9.eltwise"
+    ],
+    "T": 8,
+    "S": 8,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 4.7
+   },
+   {
+    "F": "0.features.10.conv.0.primary_conv.0",
+    "members": [
+     "0.features.10.conv.0.primary_conv.0"
+    ],
+    "T": 7,
+    "S": 8,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 19.79
+   },
+   {
+    "F": "0.features.10.conv.0.cheap_operation.0",
+    "members": [
+     "0.features.10.conv.0.cheap_operation.0"
+    ],
+    "T": 7,
+    "S": 8,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 9.63
+   },
+   {
+    "F": "0.features.10.conv.1.0",
+    "members": [
+     "0.features.10.conv.0.concat",
+     "0.features.10.conv.1.0"
+    ],
+    "T": 7,
+    "S": 16,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 11.41
+   },
+   {
+    "F": "0.features.10.conv.3.primary_conv.0",
+    "members": [
+     "0.features.10.conv.3.primary_conv.0"
+    ],
+    "T": 4,
+    "S": 2,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 32.59
+   },
+   {
+    "F": "0.features.10.shortcut.1",
+    "members": [
+     "0.features.10.shortcut.0.0",
+     "0.features.10.shortcut.1"
+    ],
+    "T": 2,
+    "S": 1,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 7.37
+   },
+   {
+    "F": "0.features.10.eltwise",
+    "members": [
+     "0.features.10.conv.3.cheap_operation.0",
+     "0.features.10.conv.3.concat",
+     "0.features.10.eltwise"
+    ],
+    "T": 4,
+    "S": 4,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 9.32
+   },
+   {
+    "F": "0.features.11.conv.0.primary_conv.0",
+    "members": [
+     "0.features.11.conv.0.primary_conv.0"
+    ],
+    "T": 2,
+    "S": 2,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 15.06
+   },
+   {
+    "F": "0.features.11.conv.0.cheap_operation.0",
+    "members": [
+     "0.features.11.conv.0.cheap_operation.0"
+    ],
+    "T": 7,
+    "S": 16,
+    "P": 2,
+    "Q": 1,
+    "sched": "unit",
+    "us": 4.4
+   },
+   {
+    "F": "0.features.11.conv.0.concat",
+    "members": [
+     "0.features.11.conv.0.concat"
+    ],
+    "T": 4,
+    "S": 8,
+    "P": 1,
+    "Q": 2,
+    "sched": "unit",
+    "us": 8.3
+   },
+   {
+    "F": "0.features.11.conv.3.primary_conv.0",
+    "members": [
+     "0.features.11.conv.3.primary_conv.0"
+    ],
+    "T": 4,
+    "S": 2,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 92.17
+   },
+   {
+    "F": "0.features.11.conv.3.concat",
+    "members": [
+     "0.features.11.conv.3.cheap_operation.0",
+     "0.features.11.conv.3.concat"
+    ],
+    "T": 4,
+    "S": 4,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 8.3
+   },
+   {
+    "F": "0.final_expand_layer.conv",
+    "members": [
+     "0.features.11.eltwise",
+     "0.final_expand_layer.conv"
+    ],
+    "T": 1,
+    "S": 1,
+    "P": 1,
+    "Q": 1,
+    "sched": "unit",
+    "us": 18.85
+   }
+  ]
+ },
+ "totalUs": 1610.443,
+ "adapter": {
+  "vendor": "amd",
+  "architecture": "rdna-3"
+ }
+}
