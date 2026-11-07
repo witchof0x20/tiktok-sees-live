@@ -6,9 +6,14 @@ from-scratch WebGPU engine. Everything runs in the browser, on your device.
 
 - `upstream/` – the original tool, mirrored with its original paths (`/upstream/tools/tiktok-face/`).
 - `live/` – the live app (`/live/`) and the GPU engine (`live/gpu/`).
-- `live/test/` – bit-exactness check, crop fidelity check, benchmark, micro-benchmark, autotuner.
+- `live/models/` – the face detector and landmark models converted from MediaPipe's `face_landmarker.task`.
+- `live/test/` – bit-exactness check, face model and face finder checks, crop fidelity check, benchmarks, autotuner.
+- `tools/` – TFLite converter, graph/bounds analysis, headless Chromium driver, dev server.
 
 ## Run
+
+Camera frames are read with `MediaStreamTrackProcessor` and drawn with WebGPU rather than through a `<video>`
+element, which shows blank frames on some Linux/Vulkan Chrome setups.
 
 ```sh
 nix develop            # node, python, chromium
@@ -44,19 +49,37 @@ How it gets fast:
 - **Autotuner** (`tune.js`, `live/test/tune.html`). Greedy fusion and per-kernel (tile, split, P, Q, schedule)
   choices driven by GPU timestamp measurements, saved to `live/tuned/<arch>.json` and loaded at runtime.
   Without a tuning file, a heuristic cost model is used.
-- **Everything in one submit.** Frame copy → mips (only if a face is small) → crop (fused into the first conv
-  of each net, sampling the video texture directly) → both nets for every face in the batch → readback of the
-  pooled sums. The small fc/softmax tail runs on the CPU with the reference's exact float code. Up to three
-  frames are in flight.
+- **Everything in one submit, no CPU round trips.** Per camera frame: upload → mips → face detector → NMS/ROIs →
+  face landmarks (one batch item per face) → crop parameters → both TikTok nets (one batch item per face) →
+  one readback. Face counts never come back to the CPU mid-frame: post-processing kernels write them to GPU
+  buffers, and later stages size themselves with indirect dispatch. Crops are fused into each net's first conv,
+  which samples the video texture directly. The small fc/softmax tail runs on the CPU with the reference's exact
+  float code. Up to three frames are in flight.
 
-Face finding uses the same MediaPipe FaceLandmarker as upstream (video mode, GPU delegate), with the same
-landmark picks and sanity filter.
+## The face finder (`live/gpu/facefinder.js`)
+
+A re-implementation of MediaPipe's FaceLandmarker on the same engine; MediaPipe itself is no longer in the loop.
+`tools/convert_tflite.py` (with a small, bounds-checked flatbuffer reader in `tools/tflite.py`) converts the
+BlazeFace short-range detector and the FaceMesh v2 landmark model out of `face_landmarker.task` into the engine's
+float graph format offline, so the browser never parses TFLite. float16 weights are widened to f32 losslessly;
+inference is f32, matching a CPU reference interpreter to ~1e-6 relative (`live/test/verify-face.html`).
+
+The graph logic around the models is ported to two WGSL kernels:
+- **detPost**: decodes the 896 SSD anchors, applies weighted NMS, removes the letterbox, builds rotated ROIs (eye
+  keypoints, square long side, ×1.5) and merges them with ROIs tracked from the previous frame's landmarks.
+- **lmPost**: presence score, projects the 478 landmarks back to the frame, computes next frame's tracking ROIs,
+  and derives upstream's eye/mouth points and sanity filter plus the TikTok crop parameters.
+
+Against MediaPipe on the same frames, landmarks agree to ~0.4–0.5% of the eye distance (`live/test/facefinder.html`).
+The MediaPipe path is still available in the app (Face finder → MediaPipe workers) for comparison.
 
 ## Tuning
 
 ```sh
 # stable clocks give stable timings (AMD):
 echo high | sudo tee /sys/class/drm/card1/device/power_dpm_force_performance_level
-node tools/cdp.mjs "http://127.0.0.1:8766/live/test/tune.html?k=16" "window.__tune && JSON.stringify(window.__tune)" 3000000 > live/tuned/rdna-3.json
+node tools/cdp.mjs "http://127.0.0.1:8766/live/test/tune.html?k=16" "window.__tune && JSON.stringify(window.__tune)" 3000000 > tiktok.json
+node tools/cdp.mjs "http://127.0.0.1:8766/live/test/tune.html?k=16&nets=face" "window.__tune && JSON.stringify(window.__tune)" 3000000 > face.json
+# merge the two "nets" maps into live/tuned/<architecture>.json
 echo auto | sudo tee /sys/class/drm/card1/device/power_dpm_force_performance_level
 ```

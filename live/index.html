@@ -36,7 +36,11 @@
     <label>Faces <select id="faces">
       <option>1</option><option>2</option><option selected>4</option>
     </select></label>
-    <label>Finder workers <select id="workers">
+    <label>Face finder <select id="finderMode">
+      <option value="gpu" selected>GPU (ours, fused)</option>
+      <option value="mediapipe">MediaPipe workers</option>
+    </select></label>
+    <label id="workersLabel">Workers <select id="workers">
       <option>1</option><option>2</option><option selected>3</option><option>4</option>
     </select></label>
     <label><input type="checkbox" id="mesh" checked> Landmarks</label>

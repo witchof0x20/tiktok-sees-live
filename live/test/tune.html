@@ -13,7 +13,9 @@ const q = new URLSearchParams(location.search);
 try {
   const { device, info } = await requestDevice();
   log(`adapter ${info.vendor} ${info.architecture}`);
-  const specs = await Promise.all([load('expnet'), load('agenet')]);
+  // ?nets=face selects the converted face models; default is the TikTok nets.
+  const loadF = async n => { const [ir, buf] = await Promise.all([fetch(`../models/${n}.json`).then(r => r.json()), fetch(`../models/${n}.bin`).then(r => r.arrayBuffer())]); return { ir, buf, dtype: 'f32', wanted: { face_detector: ['t160', 't163', 't166', 't169'], face_landmarks: ['t472', 't473'] }[n] }; };
+  const specs = q.get('nets') === 'face' ? await Promise.all([loadF('face_detector'), loadF('face_landmarks')]) : await Promise.all([load('expnet'), load('agenet')]);
   const t0 = performance.now();
   const res = await tune(device, specs, { opt: JSON.parse(q.get('opt') || '{}'), topK: +(q.get('k') || 24), log });
   res.adapter = { vendor: info.vendor, architecture: info.architecture };

@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Pipeline bench</title>
+<style>body{font:14px/1.4 ui-monospace,monospace;margin:16px;background:#111;color:#ddd}pre{white-space:pre-wrap}</style>
+<script type="module">
+// Whole per-frame pipeline (face finder + TikTok nets) on a static 1280x720 frame: per-stage GPU times, throughput.
+import { requestDevice, createProgram } from '../gpu/engine.js';
+import { FrameTexture } from '../gpu/frame.js';
+import { FaceFinder, OUT_FLOATS } from '../gpu/facefinder.js';
+const el = document.getElementById('log'), log = t => { el.textContent += t + '\n'; console.log(t); };
+const q = new URLSearchParams(location.search), faces = +(q.get('faces') || 1), frames = +(q.get('frames') || 200);
+const BASE = '/upstream/tools/tiktok-face/';
+const WANT = { expnet: ['predict_attractive', 'prob_exp', 'predict_valence', 'predict_arousal'], agenet: ['predict_age', 'prob_gender'] };
+const load = async n => { const [spec, buf] = await Promise.all([fetch(BASE + n + '.json').then(r => r.json()), fetch(BASE + n + '.bin').then(r => r.arrayBuffer())]); return { spec, buf, wanted: WANT[n] }; };
+const median = a => [...a].sort((x, y) => x - y)[a.length >> 1];
+try {
+  const { device, info } = await requestDevice();
+  const tuned = q.get('tuned') === '0' ? null : await fetch(`../tuned/${info.architecture}.json`).then(r => r.ok ? r.json() : null).catch(() => null);
+  const opt = JSON.parse(q.get('opt') || '{}');
+  const build = async profile => {
+    const ff = await FaceFinder.create(device, { base: '../models/', tuned, opt, profile });
+    const tt = await createProgram(device, await Promise.all([load('expnet'), load('agenet')]), { maxBatch: 4, source: 'texture', tuned, profile, batchBuffer: ff.ttBatch, cropsBuffer: ff.ttCrops, label: 'tiktok' });
+    return { ff, tt };
+  };
+  const img = new Image(); img.src = BASE + 'sample.jpg'; await img.decode();
+  const cv = Object.assign(document.createElement('canvas'), { width: 1280, height: 720 }), x = cv.getContext('2d');
+  x.fillStyle = '#3a3f4a'; x.fillRect(0, 0, 1280, 720);
+  for (let i = 0; i < faces; i++) { const S = faces > 1 ? 300 : 600; x.drawImage(img, 160 + i * 1000 / faces, faces > 1 ? 200 : 60, S, S); }
+  const frame = new FrameTexture(device); frame.upload(cv, 1280, 720);
+  const levels = frame.tex.mipLevelCount;
+  const run = ({ ff, tt }, readback) => {
+    ff.setFrame(1280, 720, levels);
+    const enc = device.createCommandEncoder();
+    frame.mips(enc, levels - 1); ff.encode(enc, frame.view); tt.encode(enc, { view: frame.view });
+    if (readback) enc.copyBufferToBuffer(ff.out, 0, readback, 0, OUT_FLOATS * 4);
+    device.queue.submit([enc.finish()]);
+  };
+  // Per-stage timestamps.
+  const P = await build(true);
+  const acc = { det: [], lm: [], tt: [] };
+  for (let i = 0; i < 40; i++) {
+    run(P);
+    const [d, l, t] = await Promise.all([P.ff.det.readTimes(), P.ff.lm.readTimes(), P.tt.readTimes()]);
+    if (i >= 10) { acc.det.push(d.reduce((a, b) => a + b, 0)); acc.lm.push(l.reduce((a, b) => a + b, 0)); acc.tt.push(t.reduce((a, b) => a + b, 0)); }
+  }
+  log(`GPU time per frame (${faces} face${faces > 1 ? 's' : ''}): detector ${median(acc.det).toFixed(0)} us, landmarks ${median(acc.lm).toFixed(0)} us, TikTok nets ${median(acc.tt).toFixed(0)} us`);
+  // Throughput: back-to-back frames, readback every frame (like the live loop, up to 3 in flight).
+  const B = await build(false);
+  const rbs = Array.from({ length: 3 }, () => ({ b: device.createBuffer({ size: OUT_FLOATS * 4, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }), p: null }));
+  for (let i = 0; i < 20; i++) { run(B, rbs[0].b); await rbs[0].b.mapAsync(GPUMapMode.READ); rbs[0].b.unmap(); }
+  const lat = [];
+  for (let i = 0; i < 60; i++) { const t0 = performance.now(); run(B, rbs[0].b); await rbs[0].b.mapAsync(GPUMapMode.READ); const f = new Float32Array(rbs[0].b.getMappedRange().slice(0, 16)); rbs[0].b.unmap(); lat.push(performance.now() - t0); if (i === 0) log(`faces found: ${f[0]}`); }
+  const t0 = performance.now();
+  for (let i = 0; i < frames; i++) {
+    const r = rbs[i % 3];
+    if (r.p) await r.p;
+    run(B, r.b);
+    r.p = r.b.mapAsync(GPUMapMode.READ).then(() => r.b.unmap());
+  }
+  await Promise.all(rbs.map(r => r.p));
+  const per = (performance.now() - t0) / frames;
+  log(`latency submit -> result: median ${median(lat).toFixed(2)} ms; pipelined: ${per.toFixed(2)} ms per frame (${(1000 / per).toFixed(0)} frames/s)`);
+  window.__bp = { per, lat: median(lat), ...Object.fromEntries(Object.entries(acc).map(([k, v]) => [k, median(v)])) };
+} catch (e) { log(String(e.stack || e)); window.__bp = { error: String(e) }; }
+</script></head><body><pre id="log"></pre></body></html>

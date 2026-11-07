@@ -11,8 +11,9 @@ const V = '/upstream/tools/tiktok-face/vendor/';
 const el = document.getElementById('log'), log = t => { el.textContent += t + '\n'; console.log(t); };
 const q = new URLSearchParams(location.search);
 try {
-  const { device } = await requestDevice();
-  const ff = await FaceFinder.create(device, { base: '../models/' });
+  const { device, info } = await requestDevice();
+  const tuned = q.get('tuned') ? await fetch(`../tuned/${info.architecture}.json`).then(r => r.json()) : null;
+  const ff = await FaceFinder.create(device, { base: '../models/', tuned });
   log(`detector ${ff.det.kernelCount} kernels / ${ff.det.dispatches} dispatches; landmarks ${ff.lm.kernelCount} kernels / ${ff.lm.dispatches} dispatches`);
   const frame = new FrameTexture(device);
   const outBytes = (4 + MAX_FACES * FACE_STRIDE) * 4;

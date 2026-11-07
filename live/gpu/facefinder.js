@@ -12,7 +12,7 @@ import { EXP, AGE } from './frame.js';
 export const MAX_FACES = 4;
 export const N_LM = 478;
 export const FACE_STRIDE = 16 + 2 * N_LM; // floats per face in the output block
-const OUT_FLOATS = 4 + MAX_FACES * FACE_STRIDE;
+export const OUT_FLOATS = 4 + MAX_FACES * FACE_STRIDE;
 
 const MODELS = { face_detector: ['t160', 't163', 't166', 't169'], face_landmarks: ['t472', 't473'] };
 async function loadModel(base, name) {
@@ -222,7 +222,7 @@ export async function compile(device, label, code) {
 }
 
 export class FaceFinder {
-  static async create(device, { base = 'models/', opt = {}, tuned = null, minDetection = 0.5, minPresence = 0.6 } = {}) {
+  static async create(device, { base = 'models/', opt = {}, tuned = null, profile = false, minDetection = 0.5, minPresence = 0.6 } = {}) {
     const ff = new FaceFinder();
     ff.device = device;
     const [detSpec, lmSpec] = await Promise.all([loadModel(base, 'face_detector'), loadModel(base, 'face_landmarks')]);
@@ -237,8 +237,8 @@ export class FaceFinder {
     ff.out = mk(OUT_FLOATS * 4, U.STORAGE | U.COPY_SRC);
     ff.params = mk(64, U.UNIFORM | U.COPY_DST);
     [ff.det, ff.lm] = await Promise.all([
-      createProgram(device, [detSpec], { maxBatch: 1, source: 'texture', opt, tuned, label: 'detector' }),
-      createProgram(device, [lmSpec], { maxBatch: MAX_FACES, source: 'texture', opt, tuned, batchBuffer: ff.lmBatch, cropsBuffer: ff.lmCrops, label: 'landmarks' }),
+      createProgram(device, [detSpec], { maxBatch: 1, source: 'texture', opt, tuned, profile, label: 'detector' }),
+      createProgram(device, [lmSpec], { maxBatch: MAX_FACES, source: 'texture', opt, tuned, profile, batchBuffer: ff.lmBatch, cropsBuffer: ff.lmCrops, label: 'landmarks' }),
     ]);
     const d = n => ff.det.output(0, n), l = n => ff.lm.output(0, n);
     const [detPost, lmPost] = await Promise.all([
@@ -257,8 +257,8 @@ export class FaceFinder {
   reset() { this.device.queue.writeBuffer(this.track, 0, new Int32Array(4)); }
 
   // Detector input: the whole frame letterboxed into 128x128 (uniform scale, centered), from a suitable mip.
-  setFrame(w, h, levels) {
-    const key = `${w}x${h}x${levels}`;
+  setFrame(w, h, levels, maxFaces = MAX_FACES) {
+    const key = `${w}x${h}x${levels}x${maxFaces}`;
     if (key === this.frameKey) return;
     this.frameKey = key;
     const s = Math.max(w, h) / 128;
@@ -271,7 +271,7 @@ export class FaceFinder {
     this.device.queue.writeBuffer(this.det.crops, 0, this.cropData);
     const p = new ArrayBuffer(64), f = new Float32Array(p), i = new Int32Array(p);
     f.set([w, h, 128 * s, this.minDetection, w / 2 - 64 * s, h / 2 - 64 * s, this.minPresence, 0.3, 0.5]);
-    i[9] = MAX_FACES; i[10] = levels;
+    i[9] = Math.min(maxFaces, MAX_FACES); i[10] = levels;
     this.device.queue.writeBuffer(this.params, 0, p);
   }
 

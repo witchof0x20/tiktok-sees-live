@@ -1,14 +1,14 @@
 // Measurement-driven autotuner. Times candidate kernels on the real GPU (many back-to-back dispatches between
 // two timestamps), then makes the same greedy fusion decisions as the planner, but on measured times.
-import { parseNet, packWeights } from './graph.js';
+import { parseNet, packWeights, parseFloatNet, packFloatWeights } from './graph.js';
 import { candidates, DEFAULTS } from './fuse.js';
 import { moduleSource } from './codegen.js';
 
 export async function tune(device, specs, { opt: over = {}, topK = 24, reps = 40, overheadUs = 2, log = () => {} } = {}) {
   if (!device.features.has('timestamp-query')) throw new Error('tuning needs timestamp-query');
   const opt = { ...DEFAULTS, sharedBytes: device.limits.maxComputeWorkgroupStorageSize, maxRecompute: 4, ...over };
-  const nets = specs.map(s => parseNet(s.spec, s.wanted));
-  const packed = nets.map((n, i) => packWeights(n, specs[i].buf, { u24: opt.u24 !== false }));
+  const nets = specs.map(s => s.dtype === 'f32' ? parseFloatNet(s.ir, s.wanted) : parseNet(s.spec, s.wanted));
+  const packed = nets.map((n, i) => n.dtype === 'f32' ? packFloatWeights(n, specs[i].buf) : packWeights(n, specs[i].buf, { u24: opt.u24 !== false }));
   const wBase = [];
   let wLen = 0;
   for (const p of packed) { wBase.push(wLen); wLen += p.length / 4; }

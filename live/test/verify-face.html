@@ -12,11 +12,12 @@ const MODELS = { face_detector: ['t160', 't163', 't166', 't169'], face_landmarks
 const load = async n => { const [ir, buf] = await Promise.all([fetch(`../models/${n}.json`).then(r => r.json()), fetch(`../models/${n}.bin`).then(r => r.arrayBuffer())]); return { ir, buf, wanted: MODELS[n], dtype: 'f32' }; };
 const rnd = (n, seed, lo, hi) => { let s = seed >>> 0; const a = new Float32Array(n); for (let i = 0; i < n; i++) { s = (s * 1664525 + 1013904223) >>> 0; a[i] = lo + (hi - lo) * s / 2 ** 32; } return a; };
 try {
-  const { device } = await requestDevice();
+  const { device, info } = await requestDevice();
+  const tuned = q.get('tuned') ? await fetch(`../tuned/${info.architecture}.json`).then(r => r.json()) : null;
   let worst = 0;
   for (const name of Object.keys(MODELS)) {
     const spec = await load(name), d = spec.ir.nodes[0], [lo, hi] = d.range;
-    const prog = await createProgram(device, [spec], { maxBatch: 2, source: 'tensor', opt, label: name });
+    const prog = await createProgram(device, [spec], { maxBatch: 2, source: 'tensor', opt, tuned, label: name });
     log(`${name}: ${prog.kernelCount} kernels / ${prog.dispatches} dispatches, compiled ${prog.compileMs.toFixed(0)} ms`);
     // Two inputs in one batch: noise, and a smooth gradient image.
     const n = d.H * d.W * d.C;
