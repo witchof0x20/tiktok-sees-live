@@ -36,7 +36,7 @@
       <option value="1920x1080">1920×1080</option>
     </select></label>
     <label>Faces <select id="faces">
-      <option>1</option><option>2</option><option selected>4</option>
+      <option selected>1</option><option>2</option><option>4</option>
     </select></label>
     <label>Face finder <select id="finderMode">
       <option value="gpu" selected>GPU (ours, fused)</option>
@@ -59,7 +59,7 @@
     <div><dt>Face finder, per frame</dt><dd id="msDet">–</dd></div>
     <div><dt>Nets, submit → result</dt><dd id="msNet">–</dd></div>
     <div><dt>Face finder runs on</dt><dd id="finder">–</dd></div>
-    <div><dt>Max faces</dt><dd>4 per submit</dd></div>
+    <div><dt>Max faces</dt><dd id="maxFaces">1</dd></div>
     <div class="wide"><dt>Engine</dt><dd id="engine">–</dd></div>
   </section>
   <section class="diag" aria-label="Diagnostics">

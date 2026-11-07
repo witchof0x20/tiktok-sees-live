@@ -392,6 +392,7 @@ function hud() {
   $('fpsNet').textContent = `${stats.net.value().toFixed(0)} fps`;
   $('msNet').textContent = `${stats.gpuMs.v.toFixed(1)} ms`;
   $('msE2e').textContent = `${stats.e2e.v.toFixed(1)} ms`;
+  $('maxFaces').textContent = $('faces').value;
   setTimeout(hud, 250);
 }
 
