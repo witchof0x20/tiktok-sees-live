@@ -419,9 +419,10 @@ function draw(w, h, src) {
     const s = match(f), lines = [];
     if (s) {
       const ok = s.age >= MIN_AGE, male = s.boy >= 0.5, top = s.exp.map((p, j) => [MOOD[j], p]).sort((a, b) => b[1] - a[1])[0];
-      lines.push([ok ? s.attractive.toFixed(1) : '–', ok ? 'Attractiveness' : 'No score under 16']);
-      lines.push([`${Math.round(s.age)}`, 'Age guess']);
-      lines.push([`${male ? 'Male' : 'Female'} ${Math.round(100 * (male ? s.boy : 1 - s.boy))}%`, 'Gender guess']);
+      // Attractiveness is on the original tool's 0-100 scale (model output + 15, clamped).
+      lines.push([ok ? s.attractive.toFixed(1) : '–', ok ? 'Attractiveness' : 'No score under 16', ok ? { f: s.attractive / 100, color: '254,44,85' } : null]);
+      lines.push([`${Math.round(s.age)}`, 'Age guess', { f: s.age / 100, color: '37,244,238' }]);
+      lines.push([`${male ? 'Male' : 'Female'} ${Math.round(100 * (male ? s.boy : 1 - s.boy))}%`, 'Gender guess', { f: s.boy, color: genderColor(s.boy), mid: true }]);
       lines.push([`${top[0]} ${Math.round(top[1] * 100)}%`, 'Mood']);
     } else lines.push(['…', 'Scoring']);
     drawCard(bx, y1 + 8 * k, Math.max(bw, 190 * k), lines, k);
@@ -429,14 +430,28 @@ function draw(w, h, src) {
   });
 }
 
+// P(male) -> colour: pink at 0 through to blue at 1 (linear in RGB), as "r,g,b".
+function genderColor(p) {
+  const a = [255, 92, 170], b = [64, 150, 255], t = Math.min(1, Math.max(0, p));
+  return a.map((v, i) => Math.round(v + (b[i] - v) * t)).join(',');
+}
+
 function drawCard(x, y, W, lines, k) {
   const pad = 10 * k, lh = 26 * k, H = pad * 2 + lines.length * lh;
   if (y + H > overlay.height) y = overlay.height - H - 4;
   ctx.fillStyle = 'rgba(18,18,17,.78)';
   ctx.beginPath(); ctx.roundRect(x, y, W, H, 10 * k); ctx.fill();
-  lines.forEach(([big, small], i) => {
+  lines.forEach(([big, small, bar], i) => {
     const yy = y + pad + (i + 0.75) * lh;
-    ctx.fillStyle = i === 0 ? '#fe2c55' : '#f1efe9';
+    if (bar) {
+      // Value bar under the row: track, fill to the value (0..1), optional midpoint tick.
+      const bx = x + pad * 0.5, bw = W - pad, by = y + pad + i * lh + 3 * k, bh = lh - 6 * k, f = Math.min(1, Math.max(0, bar.f));
+      ctx.fillStyle = 'rgba(255,255,255,.06)';
+      ctx.beginPath(); ctx.roundRect(bx, by, bw, bh, 5 * k); ctx.fill();
+      if (f > 0) { ctx.fillStyle = `rgba(${bar.color},.38)`; ctx.beginPath(); ctx.roundRect(bx, by, Math.max(bw * f, 6 * k), bh, 5 * k); ctx.fill(); }
+      if (bar.mid) { ctx.fillStyle = 'rgba(255,255,255,.35)'; ctx.fillRect(bx + bw / 2 - 0.75 * k, by + 2 * k, 1.5 * k, bh - 4 * k); }
+    }
+    ctx.fillStyle = i === 0 && !bar ? '#fe2c55' : i === 0 ? '#fff' : '#f1efe9'; // on its red bar the score reads in white
     ctx.font = `${i === 0 ? 700 : 600} ${(i === 0 ? 22 : 17) * k}px ui-sans-serif, system-ui, sans-serif`;
     ctx.textAlign = 'left'; ctx.fillText(big, x + pad, yy);
     ctx.fillStyle = '#9a958b'; ctx.font = `${12 * k}px ui-sans-serif, system-ui, sans-serif`;
