@@ -20,7 +20,7 @@ export async function tune(device, specs, { opt: over = {}, topK = 24, reps = 40
   const act = device.createBuffer({ size: arenaVec * 16, usage: U.STORAGE });
   const sums = device.createBuffer({ size: 1 << 16, usage: U.STORAGE });
   const cfg = device.createBuffer({ size: 16, usage: U.UNIFORM | U.COPY_DST });
-  device.queue.writeBuffer(cfg, 0, new Int32Array([1, 0, 0, 0]));
+  device.queue.writeBuffer(cfg, 0, new Int32Array([1, 1, 1, 1]));
   const bgl = device.createBindGroupLayout({ entries: [0, 1, 2, 3].map(b => ({ binding: b, visibility: GPUShaderStage.COMPUTE, buffer: { type: b === 0 ? 'read-only-storage' : b === 3 ? 'uniform' : 'storage' } })) });
   const layout = device.createPipelineLayout({ bindGroupLayouts: [bgl] });
   const bg = device.createBindGroup({ layout: bgl, entries: [wts, act, sums, cfg].map((buffer, binding) => ({ binding, resource: { buffer } })) });
@@ -63,14 +63,14 @@ export async function tune(device, specs, { opt: over = {}, topK = 24, reps = 40
     F.sumOff = 0;
     const ctx = { wg: opt.wg, source: 'tensor', nets: nets.length };
     const built = await Promise.all(cands.map(async plan => {
-      const k = { group: { members, F, plan }, net: ni, wBase: wBase[ni] };
+      const k = { group: { members, F, plan }, net: ni, wBase: wBase[ni], dtype: nets[ni].dtype };
       const src = moduleSource([k], ctx);
       device.pushErrorScope('validation');
       try {
         const module = device.createShaderModule({ code: src.code });
         const pipeline = await device.createComputePipelineAsync({ layout, compute: { module, entryPoint: 'main' } });
         const err = await device.popErrorScope();
-        return err ? null : { plan, pipeline, nwg: src.wgPerItem };
+        return err ? null : { plan, pipeline, nwg: src.perNet.reduce((a, b) => a + b, 0) };
       } catch (e) { await device.popErrorScope(); return null; }
     }));
     let best = null;

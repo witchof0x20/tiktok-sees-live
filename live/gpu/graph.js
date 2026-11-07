@@ -1,8 +1,8 @@
 // Turns a decoded net spec into a typed graph: shapes, fractional bits, consumers, and dead-code elimination.
 // Everything after the global average pools (flat/fc/softmax) stays on the CPU as the "tail".
 
-export const SPATIAL = new Set(['conv', 'dw']);
-export const POINT = new Set(['add', 'concat']);
+export const SPATIAL = new Set(['conv', 'dw', 'pool']);
+export const POINT = new Set(['add', 'concat', 'cpad', 'act']);
 
 export function parseNet(spec, wanted) {
   const ops = spec.ops, byOut = new Map();
@@ -68,7 +68,7 @@ export function packWeights(net, buf, { u24 = true } = {}) {
   const chunks = [];
   let off = 0; // in vec4 units
   for (const n of net.order) {
-    if (!SPATIAL.has(n.op)) continue;
+    if (n.op !== 'conv' && n.op !== 'dw') continue;
     const o = n.spec, X = n.ins[0], taps = o.kh * o.kw, dw = n.op === 'dw';
     let w;
     if (dw) {
@@ -135,4 +135,75 @@ export function runTail(net, buf, sums, b) {
     }
     return T;
   }
+}
+
+// Float graphs converted from TFLite (tools/convert_tflite.py). Channel counts need not be multiples of 4: tensors
+// are padded to whole channel groups and the padding channels stay exactly zero (zero weights and biases).
+export const FLOAT_POINT = new Set(['add', 'cpad', 'act']);
+export function parseFloatNet(ir, wanted) {
+  const byName = new Map(ir.nodes.map(n => [n.name, n]));
+  const live = new Set(), stack = [...wanted];
+  while (stack.length) {
+    const n = stack.pop();
+    if (live.has(n)) continue;
+    if (!byName.has(n)) throw new Error(`unknown output ${n}`);
+    live.add(n);
+    stack.push(...(byName.get(n).ins || []));
+  }
+  const nodes = new Map(), order = [];
+  for (const o of ir.nodes) {
+    if (!live.has(o.name)) continue;
+    const ins = (o.ins || []).map(i => nodes.get(i));
+    if (ins.some(x => !x)) throw new Error(`input of ${o.name} missing`);
+    const n = { name: o.name, op: o.op, ins, cons: [], spec: o, idx: order.length, dtype: 'f32', C: o.C, H: o.H, W: o.W, CG: Math.ceil(o.C / 4), act: o.act || null };
+    if (o.op === 'data') n.range = o.range;
+    else if (o.op === 'conv' || o.op === 'dw' || o.op === 'pool') {
+      Object.assign(n, { k: o.k, s: o.s, p: o.p });
+      const X = ins[0];
+      if (o.op !== 'conv' && o.C !== X.C) throw new Error(`${o.op} channel mismatch at ${o.name}`);
+      const span = (d, out) => (out - 1) * o.s - o.p + d;
+      if (span(o.k[0], o.H) > X.H + o.p + 1 || o.H < 1) throw new Error(`bad geometry at ${o.name}`);
+    } else if (o.op === 'add') {
+      if (ins[0].C !== ins[1].C || ins[0].H !== ins[1].H) throw new Error(`add shape mismatch at ${o.name}`);
+    } else if (o.op === 'cpad') {
+      if (o.C < ins[0].C || ins[0].H !== o.H) throw new Error(`bad cpad at ${o.name}`);
+    } else if (o.op !== 'act') throw new Error(`unsupported op ${o.op}`);
+    if (n.act && !['relu', 'prelu'].includes(n.act)) throw new Error(`unsupported activation ${n.act}`);
+    for (const x of ins) x.cons.push(n);
+    nodes.set(o.name, n); order.push(n);
+  }
+  for (const n of order) n.toGap = false;
+  const outputs = wanted.map(w => nodes.get(w));
+  return { name: ir.name, dtype: 'f32', nodes, order, tail: [], gaps: [], data: order[0], outputs };
+}
+
+// Packs float weights (TFLite OHWI / 1HWC) into the NC4 layouts the kernels read, as f32 bit patterns.
+export function packFloatWeights(net, buf) {
+  const src = new Float32Array(buf), chunks = [];
+  let off = 0;
+  const push = arr => { const at = off; chunks.push(arr); off += arr.length / 4; return at; };
+  const vecs = (base, C, CG) => { const a = new Float32Array(CG * 4); for (let c = 0; c < C; c++) a[c] = src[base + c]; return a; };
+  for (const n of net.order) {
+    const o = n.spec;
+    if (n.op === 'conv' || n.op === 'dw') {
+      const X = n.ins[0], [kh, kw] = n.k, taps = kh * kw, cog = n.CG;
+      let w;
+      if (n.op === 'dw') {
+        w = new Float32Array(taps * cog * 4);
+        for (let t = 0; t < taps; t++) for (let c = 0; c < n.C; c++) w[t * cog * 4 + c] = src[o.wOff + t * n.C + c];
+      } else {
+        const icPad = X.CG * 4;
+        w = new Float32Array(taps * icPad * cog * 4);
+        for (let c = 0; c < n.C; c++) for (let t = 0; t < taps; t++) for (let i = 0; i < X.C; i++)
+          w[(t * icPad + i) * cog * 4 + c] = src[o.wOff + (c * taps + t) * X.C + i];
+      }
+      n.bOff = push(vecs(o.bOff, n.C, cog));
+      n.wOff = push(w);
+    }
+    if (n.act === 'prelu') n.alphaOff = push(vecs(o.aOff, n.C, n.CG));
+  }
+  const all = new Float32Array(off * 4);
+  let p = 0;
+  for (const c of chunks) { all.set(c, p); p += c.length; }
+  return new Int32Array(all.buffer);
 }

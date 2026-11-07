@@ -77,6 +77,8 @@ function blockCostWith(members, mode, opt, WLD) {
     let c;
     if (n.op === 'add') c = elem(n.ins[0]) + elem(n.ins[1]) + 3;
     else if (n.op === 'concat') c = Math.max(...n.ins.map(elem)) + 2;
+    else if (n.op === 'cpad') c = elem(n.ins[0]) + 1;
+    else if (n.op === 'act') c = elem(n.ins[0]) + 3;
     else c = blk(n, 1, 1);
     memoE.set(n, c);
     return c;
@@ -90,6 +92,9 @@ function blockCostWith(members, mode, opt, WLD) {
     else if (n.op === 'concat') c = Math.max(...n.ins.map(x => blk(x, P, Q))) + 2 * P * Q;
     else if (n.op === 'conv') c = n.k[0] * n.k[1] * n.ins[0].CG * (P * (elem(n.ins[0]) + (n.u24 ? 3 : 0)) + 4 * Q * WLD + 4 * P * Q * (n.u24 ? MAD / 3 : MAD)) + 4 * P * Q;
     else if (n.op === 'dw') c = n.k[0] * Q * (((P - 1) * n.s + n.k[1]) * elem(n.ins[0]) + n.k[1] * (WLD + P * MAD)) + 4 * P * Q;
+    else if (n.op === 'pool') c = n.k[0] * Q * (((P - 1) * n.s + n.k[1]) * elem(n.ins[0]) + n.k[1] * P);
+    else if (n.op === 'cpad') c = blk(n.ins[0], P, Q) + P * Q;
+    else if (n.op === 'act') c = blk(n.ins[0], P, Q) + 3 * P * Q;
     memoB.set(key, c);
     return c;
   };
@@ -114,7 +119,7 @@ export function candidates(members, F, opt) {
   const shared = order.filter(n => mode.get(n) === 'shared');
   // Channel blocking along the output path must not straddle a concat part.
   const path = order.filter(n => mode.get(n) !== 'shared');
-  const qOk = q => path.every(n => divides(q, n.CG) && (n.op !== 'concat' || n.ins.every(x => divides(q, x.CG))));
+  const qOk = q => path.every(n => divides(q, n.CG) && (!['concat', 'cpad'].includes(n.op) || n.ins.every(x => divides(q, x.CG))));
   const base = order.reduce((a, n) => a + soloWork(n, opt), 0);
   const macs = order.reduce((a, n) => a + usefulMacs(n), 0);
   const out = [];

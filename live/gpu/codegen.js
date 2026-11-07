@@ -1,4 +1,5 @@
-// WGSL generator. Every tensor is NC4HW4 (vec4<i32> per 4 channels per pixel).
+// WGSL generator. Every tensor is NC4HW4: one vec4 per 4 channels per pixel, stored as vec4<i32>. Fixed-point
+// nets keep int16 values there; float nets store f32 bit patterns (bitcast on load/store).
 //
 // Each kernel computes one output tile. Nodes are emitted as functions of two kinds:
 //  - element reads  e(cg, y, x) -> vec4          global (zero outside the image = padding), workgroup memory,
@@ -8,7 +9,7 @@
 //                                                per P pixels, depthwise rows slide over shared loads.
 // Nodes staged in workgroup memory are computed block-wise in their own phase; the kernel output (and any
 // pointwise chain feeding it) is computed block-wise straight into registers. Several kernels can share a
-// module and be selected by workgroup index (horizontal fusion).
+// module and be selected by workgroup index (horizontal fusion); each kernel's grid scales with its net's batch.
 
 function rs(e, s) {
   if (s === 0) return e;
@@ -16,49 +17,65 @@ function rs(e, s) {
   return `(${e} * vec4<i32>(${1 << -s}))`;
 }
 const sat = e => `clamp(${e}, vec4<i32>(-32768), vec4<i32>(32767))`;
-const relu = e => `max(${e}, vec4<i32>(0))`;
-const post = (n, e) => { let v = sat(rs(e, n.sh)); if (n.act) v = relu(v); return v; };
 const range = n => Array.from({ length: n }, (_, i) => i);
+const flt = x => { const s = String(x); return /[.e]/.test(s) ? s : s + '.0'; };
 
 function kernelSource(k, j, ctx) {
   const { members, F, plan } = k.group, { mode, R, T, S, P, Q } = plan;
-  const p = `k${j}_`, wB = k.wBase;
+  const p = `k${j}_`, wB = k.wBase, f = k.dtype === 'f32';
+  const V = f ? 'vec4<f32>' : 'vec4<i32>', Z = `${V}(0)`;
+  const LD = x => f ? `bitcast<vec4<f32>>(${x})` : x, ST = x => f ? `bitcast<vec4<i32>>(${x})` : x;
+  const W = i => LD(`wts[${i}]`);
   const out = [], done = new Set();
-  const once = (name, f) => { if (!done.has(name)) { done.add(name); f(); } return name; };
+  const once = (name, fn) => { if (!done.has(name)) { done.add(name); fn(); } return name; };
+
+  // Activation epilogue for node n on value e at channel group cg (expression).
+  const actf = (n, e, cg) => {
+    if (!f) return n.act ? `max(${e}, vec4<i32>(0))` : e;
+    if (n.act === 'relu') return `max(${e}, ${Z})`;
+    if (n.act === 'prelu') return `prelu(${e}, ${W(`${wB + n.alphaOff} + ${cg}`)})`;
+    return e;
+  };
+  const post = (n, e, cg) => f ? actf(n, e, cg) : actf(n, sat(rs(e, n.sh)), cg);
+  const addv = (n, a, b, cg) => f ? actf(n, `(${a} + ${b})`, cg) : actf(n, sat(`${rs(a, n.sa)} + ${rs(b, n.sb)}`), cg);
 
   // Element read of n at absolute (cg, y, x).
   const elem = n => once(`${p}e${n.idx}`, () => {
     const name = `${p}e${n.idx}`;
     if (!members.has(n)) {
-      const body = n.op === 'data' && ctx.source === 'texture'
-        ? `return crop_px(b * ${ctx.nets} + ${k.net}, y, x);`
-        : `return act[${n.aOff} + ((b * ${n.CG} + cg) * ${n.H} + y) * ${n.W} + x];`;
-      out.push(`fn ${name}(cg: i32, y: i32, x: i32) -> vec4<i32> {
-  if (y < 0 || y >= ${n.H} || x < 0 || x >= ${n.W}) { return vec4<i32>(0); }
+      let body;
+      if (n.op === 'data' && ctx.source === 'texture')
+        body = f ? `return crop_pxf(b * ${ctx.nets} + ${k.net}, y, x, ${flt(n.range[0])}, ${flt(n.range[1])});` : `return crop_px(b * ${ctx.nets} + ${k.net}, y, x);`;
+      else body = `return ${LD(`act[${n.aOff} + ((b * ${n.CG} + cg) * ${n.H} + y) * ${n.W} + x]`)};`;
+      out.push(`fn ${name}(cg: i32, y: i32, x: i32) -> ${V} {
+  if (y < 0 || y >= ${n.H} || x < 0 || x >= ${n.W}) { return ${Z}; }
   ${body}
 }`);
     } else if (mode.get(n) === 'shared') {
       const r = R.get(n), lh = r.y1 - r.y0, lw = r.x1 - r.x0;
-      out.push(`fn ${name}(cg: i32, y: i32, x: i32) -> vec4<i32> {
-  return sh[${k.shOff.get(n)} + (cg * ${lh} + (y - (ty0 * ${r.scale} + ${r.y0}))) * ${lw} + (x - (tx0 * ${r.scale} + ${r.x0}))];
+      out.push(`fn ${name}(cg: i32, y: i32, x: i32) -> ${V} {
+  return ${LD(`sh[${k.shOff.get(n)} + (cg * ${lh} + (y - (ty0 * ${r.scale} + ${r.y0}))) * ${lw} + (x - (tx0 * ${r.scale} + ${r.x0}))]`)};
 }`);
     } else if (n.op === 'add') {
       const [A, B] = n.ins.map(elem);
-      let v = sat(`${rs(`${A}(cg, y, x)`, n.sa)} + ${rs(`${B}(cg, y, x)`, n.sb)}`);
-      if (n.act) v = relu(v);
-      out.push(`fn ${name}(cg: i32, y: i32, x: i32) -> vec4<i32> { return ${v}; }`);
+      out.push(`fn ${name}(cg: i32, y: i32, x: i32) -> ${V} { return ${addv(n, `${A}(cg, y, x)`, `${B}(cg, y, x)`, 'cg')}; }`);
+    } else if (n.op === 'act') {
+      out.push(`fn ${name}(cg: i32, y: i32, x: i32) -> ${V} { return ${actf(n, `${elem(n.ins[0])}(cg, y, x)`, 'cg')}; }`);
+    } else if (n.op === 'cpad') {
+      const X = n.ins[0];
+      out.push(`fn ${name}(cg: i32, y: i32, x: i32) -> ${V} { if (cg < ${X.CG}) { return ${elem(X)}(cg, y, x); } return ${Z}; }`);
     } else if (n.op === 'concat') {
       let c0 = 0;
       const lines = n.ins.map((X, i) => {
-        const s = n.shifts[i], call = `${elem(X)}(cg - ${c0}, y, x)`, e = s === 0 ? call : sat(rs(call, s));
+        const s = n.shifts?.[i] ?? 0, call = `${elem(X)}(cg - ${c0}, y, x)`, e = s === 0 ? call : sat(rs(call, s));
         const l = i === n.ins.length - 1 ? `  return ${e};` : `  if (cg < ${c0 + X.CG}) { return ${e}; }`;
         c0 += X.CG;
         return l;
       });
-      out.push(`fn ${name}(cg: i32, y: i32, x: i32) -> vec4<i32> {\n${lines.join('\n')}\n}`);
+      out.push(`fn ${name}(cg: i32, y: i32, x: i32) -> ${V} {\n${lines.join('\n')}\n}`);
     } else {
       const bl = block(n, 1, 1);
-      out.push(`fn ${name}(cg: i32, y: i32, x: i32) -> vec4<i32> { return ${bl}(cg, y, x)[0]; }`);
+      out.push(`fn ${name}(cg: i32, y: i32, x: i32) -> ${V} { return ${bl}(cg, y, x)[0]; }`);
     }
   });
 
@@ -66,22 +83,27 @@ function kernelSource(k, j, ctx) {
   // compute=true evaluates a staged node from its inputs (its own stage); otherwise staged nodes are read back.
   const block = (n, BP, BQ, compute = false) => once(`${p}b${n.idx}_${BP}_${BQ}${compute ? 'c' : ''}`, () => {
     const name = `${p}b${n.idx}_${BP}_${BQ}${compute ? 'c' : ''}`, N = BP * BQ, L = [];
-    const ret = `array<vec4<i32>, ${N}>`;
-    const at = (q, i) => q * BP + i;
+    const ret = `array<${V}, ${N}>`;
+    const at = (q, i) => q * BP + i, cgOf = t => `cg0 + ${(t / BP) | 0}`;
     if (!members.has(n) || (mode.get(n) === 'shared' && !compute)) {
       const e = elem(n);
       L.push(`  return ${ret}(${range(BQ).flatMap(q => range(BP).map(i => `${e}(cg0 + ${q}, y, x0 + ${i})`)).join(', ')});`);
     } else if (n.op === 'add') {
       const A = block(n.ins[0], BP, BQ), B = block(n.ins[1], BP, BQ);
       L.push(`  let a = ${A}(cg0, y, x0); let c = ${B}(cg0, y, x0);`);
-      const el = t => { let v = sat(`${rs(`a[${t}]`, n.sa)} + ${rs(`c[${t}]`, n.sb)}`); return n.act ? relu(v) : v; };
-      L.push(`  return ${ret}(${range(N).map(el).join(', ')});`);
+      L.push(`  return ${ret}(${range(N).map(t => addv(n, `a[${t}]`, `c[${t}]`, cgOf(t))).join(', ')});`);
+    } else if (n.op === 'act') {
+      L.push(`  let a = ${block(n.ins[0], BP, BQ)}(cg0, y, x0);`);
+      L.push(`  return ${ret}(${range(N).map(t => actf(n, `a[${t}]`, cgOf(t))).join(', ')});`);
+    } else if (n.op === 'cpad') {
+      const X = n.ins[0];
+      L.push(`  if (cg0 < ${X.CG}) { return ${block(X, BP, BQ)}(cg0, y, x0); }`);
+      L.push(`  return ${ret}(${range(N).map(() => Z).join(', ')});`);
     } else if (n.op === 'concat') {
       let c0 = 0;
       n.ins.forEach((X, i) => {
-        const s = n.shifts[i], bx = block(X, BP, BQ);
-        const val = s === 0 ? `${bx}(cg0 - ${c0}, y, x0)` : null;
-        const body = val ? `return ${val};` : `let a = ${bx}(cg0 - ${c0}, y, x0); return ${ret}(${range(N).map(t => sat(rs(`a[${t}]`, s))).join(', ')});`;
+        const s = n.shifts?.[i] ?? 0, bx = block(X, BP, BQ);
+        const body = s === 0 ? `return ${bx}(cg0 - ${c0}, y, x0);` : `let a = ${bx}(cg0 - ${c0}, y, x0); return ${ret}(${range(N).map(t => sat(rs(`a[${t}]`, s))).join(', ')});`;
         L.push(i === n.ins.length - 1 ? `  ${body}` : `  if (cg0 < ${c0 + X.CG}) { ${body} }`);
         c0 += X.CG;
       });
@@ -108,10 +130,10 @@ function kernelSource(k, j, ctx) {
         L.push('    }');
       }
       L.push('  }\n  }\n  }');
-      L.push(`  return ${ret}(${range(N).map(t => post(n, `bitcast<vec4<i32>>(a${t} - vec4<u32>(s${t % BP} * 2048u))`)).join(', ')});`);
+      L.push(`  return ${ret}(${range(N).map(t => post(n, `bitcast<vec4<i32>>(a${t} - vec4<u32>(s${t % BP} * 2048u))`, cgOf(t))).join(', ')});`);
     } else if (n.op === 'conv') {
       const X = n.ins[0], ex = elem(X), [kh, kw] = n.k, cog = n.CG, icg = X.CG;
-      L.push(...range(BQ).map(q => `  let bias${q} = wts[${wB + n.bOff} + cg0 + ${q}];`));
+      L.push(...range(BQ).map(q => `  let bias${q} = ${W(`${wB + n.bOff} + cg0 + ${q}`)};`));
       L.push(...range(N).map(t => `  var a${t} = bias${(t / BP) | 0};`));
       L.push(`  for (var ky = 0; ky < ${kh}; ky++) {
   let iy = y * ${n.s} - ${n.p} + ky;
@@ -121,15 +143,15 @@ function kernelSource(k, j, ctx) {
     let wb = ${wB + n.wOff} + (ky * ${kw} + kx) * ${4 * icg * cog} + ig * ${4 * cog} + cg0;`);
       L.push(...range(BP).map(i => `    let v${i} = ${ex}(ig, iy, ix + ${i * n.s});`));
       for (const q of range(BQ)) {
-        L.push(`    { let w0 = wts[wb + ${q}]; let w1 = wts[wb + ${cog + q}]; let w2 = wts[wb + ${2 * cog + q}]; let w3 = wts[wb + ${3 * cog + q}];`);
+        L.push(`    { let w0 = ${W(`wb + ${q}`)}; let w1 = ${W(`wb + ${cog + q}`)}; let w2 = ${W(`wb + ${2 * cog + q}`)}; let w3 = ${W(`wb + ${3 * cog + q}`)};`);
         L.push(...range(BP).map(i => `      a${at(q, i)} += v${i}.x * w0 + v${i}.y * w1 + v${i}.z * w2 + v${i}.w * w3;`));
         L.push('    }');
       }
       L.push('  }\n  }\n  }');
-      L.push(`  return ${ret}(${range(N).map(t => post(n, `a${t}`)).join(', ')});`);
-    } else if (n.op === 'dw') {
-      const X = n.ins[0], ex = elem(X), [kh, kw] = n.k, span = (BP - 1) * n.s + kw;
-      L.push(...range(N).map(t => `  var a${t} = wts[${wB + n.bOff} + cg0 + ${(t / BP) | 0}];`));
+      L.push(`  return ${ret}(${range(N).map(t => post(n, `a${t}`, cgOf(t))).join(', ')});`);
+    } else if (n.op === 'dw' || n.op === 'pool') {
+      const X = n.ins[0], ex = elem(X), [kh, kw] = n.k, span = (BP - 1) * n.s + kw, pool = n.op === 'pool';
+      L.push(...range(N).map(t => pool ? `  var a${t} = ${V}(-3.4e38);` : `  var a${t} = ${W(`${wB + n.bOff} + cg0 + ${(t / BP) | 0}`)};`));
       L.push(`  for (var ky = 0; ky < ${kh}; ky++) {
   let iy = y * ${n.s} - ${n.p} + ky;
   let ix = x0 * ${n.s} - ${n.p};`);
@@ -138,14 +160,15 @@ function kernelSource(k, j, ctx) {
         L.push(`  {`);
         L.push(...range(span).map(t => `    let r${t} = ${ex}(cg0 + ${q}, iy, ix + ${t});`));
         for (const kx of range(kw)) {
-          L.push(`    { let w = wts[${wB + n.wOff} + (ky * ${kw} + ${kx}) * ${n.CG} + cg0 + ${q}];`);
+          if (pool) { L.push(...range(BP).map(i => `    a${at(q, i)} = max(a${at(q, i)}, r${i * n.s + kx});`)); continue; }
+          L.push(`    { let w = ${W(`${wB + n.wOff} + (ky * ${kw} + ${kx}) * ${n.CG} + cg0 + ${q}`)};`);
           L.push(...range(BP).map(i => `      a${at(q, i)} += r${i * n.s + kx} * w;`));
           L.push('    }');
         }
         L.push('  }');
       }
       L.push('  }');
-      L.push(`  return ${ret}(${range(N).map(t => post(n, `a${t}`)).join(', ')});`);
+      L.push(`  return ${ret}(${range(N).map(t => pool ? `a${t}` : post(n, `a${t}`, cgOf(t))).join(', ')});`);
     } else throw new Error(`no block eval for ${n.op}`);
     out.push(`fn ${name}(cg0: i32, y: i32, x0: i32) -> ${ret} {\n${L.join('\n')}\n}`);
   });
@@ -172,7 +195,7 @@ function kernelSource(k, j, ctx) {
     let inY = ay >= 0 && ay < ${n.H};`);
     for (const q of range(s.Q)) for (const i of range(s.P)) {
       const guard = s.P * xb > lw ? `xi * ${s.P} + ${i} < ${lw}` : 'true';
-      lines.push(`    if (${guard}) { sh[${k.shOff.get(n)} + ((cg0 + ${q}) * ${lh} + yy) * ${lw} + xi * ${s.P} + ${i}] = select(vec4<i32>(0), v[${q * s.P + i}], inY && ax + ${i} >= 0 && ax + ${i} < ${n.W}); }`);
+      lines.push(`    if (${guard}) { sh[${k.shOff.get(n)} + ((cg0 + ${q}) * ${lh} + yy) * ${lw} + xi * ${s.P} + ${i}] = ${ST(`select(${Z}, v[${q * s.P + i}], inY && ax + ${i} >= 0 && ax + ${i} < ${n.W})`)}; }`);
     }
     lines.push(`  }
   }
@@ -190,7 +213,7 @@ function kernelSource(k, j, ctx) {
   for (const q of range(Q)) for (const i of range(P)) {
     const guard = `ax + ${i} < ${F.W}` + (P * xbF > T ? ` && xi * ${P} + ${i} < ${T}` : '');
     if (F.toGap) lines.push(`    if (${guard}) { let o = (cg0 + ${q} - split * ${cgPer}) * 4; let w = v[${q * P + i}]; atomicAdd(&gs[o], w.x); atomicAdd(&gs[o + 1], w.y); atomicAdd(&gs[o + 2], w.z); atomicAdd(&gs[o + 3], w.w); }`);
-    else lines.push(`    if (${guard}) { act[${F.aOff} + ((b * ${F.CG} + cg0 + ${q}) * ${F.H} + ay) * ${F.W} + ax + ${i}] = v[${q * P + i}]; }`);
+    else lines.push(`    if (${guard}) { act[${F.aOff} + ((b * ${F.CG} + cg0 + ${q}) * ${F.H} + ay) * ${F.W} + ax + ${i}] = ${ST(`v[${q * P + i}]`)}; }`);
   }
   lines.push('    }\n  }\n  }');
   if (F.toGap) lines.push(`  workgroupBarrier();
@@ -199,7 +222,8 @@ function kernelSource(k, j, ctx) {
   return out.join('\n') + '\n' + lines.join('\n');
 }
 
-// One module per dispatch: kernels picked by workgroup index; every kernel's grid scales with the batch.
+// One module per dispatch: kernels picked by workgroup index. Kernel j's grid is batch[net_j] * nwg_j, so the
+// workgroup ranges depend on the per-net batches (a uniform, or a GPU-written storage value for indirect dispatch).
 export function moduleSource(kernels, ctx) {
   let shVec = 1, gsLen = 1;
   for (const k of kernels) {
@@ -213,33 +237,35 @@ export function moduleSource(kernels, ctx) {
     shVec = Math.max(shVec, off);
     if (k.group.F.toGap) gsLen = Math.max(gsLen, k.group.F.C / k.group.plan.S);
   }
-  const head = [`struct Cfg { batch: i32, pad0: i32, pad1: i32, pad2: i32 }
+  const head = [`struct Cfg { batch: vec4<i32> }
 @group(0) @binding(0) var<storage, read> wts: array<vec4<i32>>;
 @group(0) @binding(1) var<storage, read_write> act: array<vec4<i32>>;
 @group(0) @binding(2) var<storage, read_write> sums: array<atomic<i32>>;
-@group(0) @binding(3) var<uniform> cfg: Cfg;
+@group(0) @binding(3) var<${ctx.gpuBatch ? 'storage, read' : 'uniform'}> cfg: Cfg;
 var<workgroup> sh: array<vec4<i32>, ${shVec}>;
 var<workgroup> gs: array<atomic<i32>, ${gsLen}>;
 var<private> b: i32;
 var<private> ty0: i32;
-var<private> tx0: i32;`];
+var<private> tx0: i32;
+fn prelu(x: vec4<f32>, a: vec4<f32>) -> vec4<f32> { return max(x, vec4<f32>(0.0)) + a * min(x, vec4<f32>(0.0)); }`];
   if (ctx.source === 'texture') head.push(CROP);
   const bodies = kernels.map((k, j) => kernelSource(k, j, ctx));
-  let acc = 0;
-  const dispatch = kernels.map((k, j) => {
-    acc += k.group.plan.nwg;
-    return `  if (w < cfg.batch * ${acc}) { k${j}_main(w - cfg.batch * ${acc - k.group.plan.nwg}, lid); return; }`;
-  });
+  const dispatch = kernels.map((k, j) => `  { let n = cfg.batch[${k.net}] * ${k.group.plan.nwg}; if (w < base + n) { k${j}_main(w - base, lid); return; } base += n; }`);
   const entry = `@compute @workgroup_size(${ctx.wg})
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
   let w = i32(wid.x); let lid = i32(li);
+  var base = 0;
 ${dispatch.join('\n')}
 }`;
-  return { code: [...head, ...bodies, entry].join('\n\n'), wgPerItem: acc, sharedBytes: shVec * 16 + gsLen * 4 };
+  // Workgroups per batch item, per net (for the dispatch size).
+  const perNet = [0, 0, 0, 0];
+  for (const k of kernels) perNet[k.net] += k.group.plan.nwg;
+  return { code: [...head, ...bodies, entry].join('\n\n'), perNet, sharedBytes: shVec * 16 + gsLen * 4 };
 }
 
-// Bilinear resample of the video frame, matching a canvas drawImage with an affine transform composited on
-// black: texels outside the frame are transparent black. Output is BGR - 128, like the reference tensor.
+// Bilinear resample of the video frame through an affine map (crop pixel center -> source texel), with texels
+// outside the frame as black. Fixed-point nets get BGR - 128 rounded like a canvas; float nets get RGB mapped
+// linearly onto their input range.
 const CROP = `struct Crop { m: vec4<f32>, t: vec2<f32>, lvl: i32, pad: i32 }
 @group(0) @binding(4) var frame: texture_2d<f32>;
 @group(0) @binding(5) var<storage, read> crops: array<Crop>;
@@ -247,7 +273,7 @@ fn texel(p: vec2<i32>, lvl: i32, size: vec2<i32>) -> vec3<f32> {
   if (p.x < 0 || p.y < 0 || p.x >= size.x || p.y >= size.y) { return vec3<f32>(0.0); }
   return textureLoad(frame, p, lvl).rgb;
 }
-fn crop_px(i: i32, y: i32, x: i32) -> vec4<i32> {
+fn crop_rgb(i: i32, y: i32, x: i32) -> vec3<f32> {
   let c = crops[i];
   let d = vec2<f32>(f32(x) + 0.5, f32(y) + 0.5);
   let s = vec2<f32>(c.m.x * d.x + c.m.z * d.y + c.t.x, c.m.y * d.x + c.m.w * d.y + c.t.y) - vec2<f32>(0.5);
@@ -255,6 +281,12 @@ fn crop_px(i: i32, y: i32, x: i32) -> vec4<i32> {
   let size = vec2<i32>(textureDimensions(frame, c.lvl));
   let top = mix(texel(p, c.lvl, size), texel(p + vec2<i32>(1, 0), c.lvl, size), fr.x);
   let bot = mix(texel(p + vec2<i32>(0, 1), c.lvl, size), texel(p + vec2<i32>(1, 1), c.lvl, size), fr.x);
-  let rgb = vec3<i32>(round(clamp(mix(top, bot, fr.y), vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0));
+  return clamp(mix(top, bot, fr.y), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+fn crop_px(i: i32, y: i32, x: i32) -> vec4<i32> {
+  let rgb = vec3<i32>(round(crop_rgb(i, y, x) * 255.0));
   return vec4<i32>(rgb.b - 128, rgb.g - 128, rgb.r - 128, 0);
+}
+fn crop_pxf(i: i32, y: i32, x: i32, lo: f32, hi: f32) -> vec4<f32> {
+  return vec4<f32>(vec3<f32>(lo) + (hi - lo) * crop_rgb(i, y, x), 0.0);
 }`;
