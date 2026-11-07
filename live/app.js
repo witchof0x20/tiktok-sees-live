@@ -99,8 +99,11 @@ async function quickTune() {
   $('skipTune').hidden = false;
   $('skipTune').onclick = () => ac.abort();
   try {
+    const t0 = performance.now();
     const plan = await tune(device, [...specs, ...faceSpecs], { quick: true, seed, signal: ac.signal,
       onProgress: f => say(`Optimizing for this GPU, one time only: ${Math.round(100 * f)}%`) });
+    plan.tuneMs = Math.round(performance.now() - t0);
+    plan.tunedAt = new Date().toISOString();
     try { localStorage.setItem(cacheKey(), JSON.stringify(plan)); } catch {}
     return plan;
   } catch (err) {
@@ -407,6 +410,29 @@ async function start() {
   }
 }
 
+// A JSON report for comparing devices: GPU, limits, plan, live rates. Copied to the clipboard and shown for manual copy.
+function diagnostics() {
+  const hud = Object.fromEntries([...document.querySelectorAll('.hud div')].map(d => [d.querySelector('dt').textContent, d.querySelector('dd').textContent]));
+  const L = device?.limits, ff = finder;
+  return {
+    when: new Date().toISOString(), page: location.href, userAgent: navigator.userAgent,
+    screen: { w: screen.width, h: screen.height, dpr: devicePixelRatio },
+    webgpu: !!navigator.gpu, adapter: adapterInfo ? { vendor: adapterInfo.vendor, architecture: adapterInfo.architecture, device: adapterInfo.device, description: adapterInfo.description } : null,
+    features: device ? [...device.features].sort() : null,
+    limits: L ? { maxComputeWorkgroupStorageSize: L.maxComputeWorkgroupStorageSize, maxComputeInvocationsPerWorkgroup: L.maxComputeInvocationsPerWorkgroup, maxStorageBufferBindingSize: L.maxStorageBufferBindingSize, maxStorageBuffersPerShaderStage: L.maxStorageBuffersPerShaderStage } : null,
+    plan: planLabel, tuneMs: tuned?.tuneMs ?? null, tuneTimer: tuned?.timer ?? null, planTotalsUs: tuned?.totalUs ?? null,
+    kernels: ff ? { detector: [ff.det.kernelCount, ff.det.dispatches], landmarks: [ff.lm.kernelCount, ff.lm.dispatches], tiktok: tiktok && [tiktok.kernelCount, tiktok.dispatches], compileMs: Math.round(ff.det.compileMs + ff.lm.compileMs + (tiktok?.compileMs || 0)) } : null,
+    source: $('src').value, finderMode: $('finderMode').value, frame: [overlay.width, overlay.height], facesNow: faces.length,
+    frameReader: typeof MediaStreamTrackProcessor === 'function' && !qp.has('video') ? 'MediaStreamTrackProcessor' : 'video',
+    hud,
+  };
+}
+$('diagBtn').addEventListener('click', async () => {
+  const text = JSON.stringify(diagnostics(), null, 1);
+  $('diagOut').value = text; $('diagOut').hidden = false;
+  try { await navigator.clipboard.writeText(text); $('diagMsg').textContent = 'Copied. Paste it anywhere.'; }
+  catch { $('diagMsg').textContent = 'Select the text below and copy it.'; $('diagOut').select(); }
+});
 $('start').addEventListener('click', start);
 for (const id of ['res', 'src']) $(id).addEventListener('change', () => {
   if (id === 'src') $('mirror').checked = $('src').value !== 'back';

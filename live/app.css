@@ -79,3 +79,7 @@ select { font: inherit; color: var(--fg); background: var(--card); border: 1px s
 .legend li { display: inline-flex; align-items: center; gap: 6px; }
 .legend b { color: var(--text-primary); font: 600 12px var(--mono); font-variant-numeric: tabular-nums; min-width: 3.5ch; }
 @media (max-width: 640px) { .graphs { grid-template-columns: 1fr; } }
+
+.diag { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; font-size: 13px; color: var(--muted); }
+.diag button.ghost { color: var(--fg); border-color: var(--line); padding: 6px 14px; }
+.diag textarea { width: 100%; min-height: 160px; font: 12px/1.4 var(--mono); background: var(--card); color: var(--fg); border: 1px solid var(--line); border-radius: 8px; padding: 8px; box-sizing: border-box; }
