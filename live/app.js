@@ -1,10 +1,12 @@
 // Live loop.
-//   camera frame ──► copy into a GPU texture ring slot ─┐
-//               └──► ImageBitmap ──► finder worker k ───┴─► landmarks ──► crop + both nets on the GPU (one submit)
-// Face finding runs in several workers round-robin; each result is scored against the exact frame it came from
-// (its ring slot), and up to three GPU submits are in flight. Drawing happens on every displayed camera frame.
+//   VideoFrame ──► copy into a GPU texture ring slot ──► preview (WebGPU) ─┐
+//              └──► ImageBitmap ──► finder worker k ──► landmarks ─────────┴─► crop + both nets on the GPU (one submit)
+// Frames come straight off the track (MediaStreamTrackProcessor), not through <video>. Face finding runs in several
+// workers round-robin; each result is scored against the exact frame it came from (its pinned ring slot), and up to
+// three GPU submits are in flight.
 import { requestDevice, createEngine, expScores, ageScores } from './gpu/engine.js';
 import { FrameTexture, EXP, AGE, cropParams, transform } from './gpu/frame.js';
+import { Display } from './gpu/display.js';
 import { Graphs } from './graphs.js';
 
 const VENDOR = new URL('/upstream/tools/tiktok-face/vendor/', location.href).href;
@@ -14,7 +16,7 @@ const MIN_AGE = 16, MAX_FACES = 4;
 const WANT = { expnet: ['predict_attractive', 'prob_exp', 'predict_valence', 'predict_arousal'], agenet: ['predict_age', 'prob_gender'] };
 
 const $ = id => document.getElementById(id);
-const video = $('video'), overlay = $('overlay'), ctx = overlay.getContext('2d'), stage = $('stage');
+const view = $('view'), overlay = $('overlay'), ctx = overlay.getContext('2d'), stage = $('stage');
 const say = t => { $('status').textContent = t; };
 const graphs = new Graphs($('graphs'));
 
@@ -22,7 +24,7 @@ function Rate() { this.t = []; this.tick = now => { this.t.push(now); while (thi
 function Avg() { this.v = 0; this.n = 0; this.add = x => { this.n++; this.v += (x - this.v) / Math.min(this.n, 30); }; }
 const stats = { cam: new Rate(), det: new Rate(), net: new Rate(), detMs: new Avg(), gpuMs: new Avg(), e2e: new Avg() };
 
-let device, engine, ring = [], workers = [], mainFinder = null, stream = null, running = false;
+let device, engine, display, ring = [], workers = [], mainFinder = null, stream = null, reader = null, running = false;
 let faces = [], facesId = -1, scored = [], scoredId = -1, frameId = 0, slotNext = 0, lastTs = -1;
 
 // Same landmark picks and sanity filter as upstream face.js. pts is [x0, y0, x1, y1, ...] normalized.
@@ -70,7 +72,7 @@ async function setWorkers(n) {
   }
   // Each in-flight detection pins a ring slot; two spare slots keep the GPU from reading a slot being refilled.
   ring.forEach(f => f.tex?.destroy());
-  ring = Array.from({ length: Math.max(1, workers.length) + 2 }, () => new FrameTexture(device));
+  ring = Array.from({ length: Math.max(1, workers.length) + 4 }, () => Object.assign(new FrameTexture(device), { pins: 0 }));
   $('finder').textContent = workers.length ? `${workers.length} worker${workers.length > 1 ? 's' : ''}` : 'main thread';
 }
 
@@ -85,6 +87,7 @@ async function init() {
   try { const r = await fetch(`tuned/${info.architecture || 'default'}.json`); if (r.ok) tuned = await r.json(); } catch {}
   say(`Compiling fused kernels${tuned ? ' (tuned for ' + info.architecture + ')' : ''}…`);
   engine = await createEngine(device, specs, { maxBatch: MAX_FACES, source: 'texture', tuned });
+  display = new Display(device, view);
   $('engine').textContent = `${info.vendor} ${info.architecture} · ${engine.kernelCount} fused kernels in ${engine.dispatches} dispatches · ${tuned ? 'autotuned' : 'heuristic'} plan · bit-exact int16 fixed point`;
   say('Loading face finder…');
   await setWorkers(+$('workers').value);
@@ -112,53 +115,75 @@ async function openCamera() {
   clearInterval(demoTimer);
   stream = $('src').value === 'demo' ? await demoStream(w, h)
     : await navigator.mediaDevices.getUserMedia({ audio: false, video: { width: { ideal: w }, height: { ideal: h }, frameRate: { ideal: 60 }, facingMode: 'user' } });
-  video.srcObject = stream;
-  await video.play();
-  overlay.width = video.videoWidth; overlay.height = video.videoHeight;
-  stage.style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`;
   faces = []; scored = [];
+  const track = stream.getVideoTracks()[0];
+  reader?.cancel().catch(() => {});
+  const r = reader = new MediaStreamTrackProcessor({ track }).readable.getReader();
+  (async () => {
+    for (;;) {
+      const { value: frame, done } = await r.read().catch(() => ({ done: true }));
+      if (done || r !== reader) { frame?.close(); break; }
+      try { onFrame(frame); } catch (err) { console.error(err); } finally { frame.close(); }
+    }
+  })();
+}
+
+function resize(w, h) {
+  if (overlay.width === w && overlay.height === h) return;
+  overlay.width = view.width = w; overlay.height = view.height = h;
+  stage.style.aspectRatio = `${w} / ${h}`;
 }
 
 const pending = new Map(); // frame id -> { slot, w, h, t }
 
-function onFrame(now, meta) {
+function onFrame(frame) {
   if (!running) return;
-  video.requestVideoFrameCallback(onFrame);
+  const now = performance.now();
   stats.cam.tick(now);
-  const w = video.videoWidth, h = video.videoHeight;
-  const ts = Math.max(lastTs + 1, Math.round(meta.mediaTime * 1000)); lastTs = ts;
+  const w = frame.displayWidth, h = frame.displayHeight;
+  resize(w, h);
+  const ts = Math.max(lastTs + 1, Math.round(frame.timestamp / 1000)); lastTs = ts;
   const id = ++frameId;
+  // Ring slots stay pinned from capture until their nets are submitted; a frame with no free slot is dropped.
+  let slot = -1;
+  for (let k = 0; k < ring.length; k++) { const c = (slotNext + k) % ring.length; if (!ring[c].pins) { slot = c; break; } }
+  if (slot < 0) return;
+  slotNext = slot + 1;
+  ring[slot].upload(frame, w, h);
+  const enc = device.createCommandEncoder();
+  display.draw(enc, ring[slot].view, $('mirror').checked);
+  device.queue.submit([enc.finish()]);
   if (workers.length) {
     const wk = workers.find(x => !x.busy);
     if (wk) {
-      wk.busy = true;
-      const slot = slotNext++ % ring.length;
-      ring[slot].upload(video, w, h);
-      pending.set(id, { slot, w, h, t: performance.now() });
-      createImageBitmap(video).then(bitmap => wk.postMessage({ type: 'frame', id, ts, bitmap }, [bitmap]), () => { wk.busy = false; pending.delete(id); });
+      wk.busy = true; ring[slot].pins++;
+      pending.set(id, { slot, w, h, t: now });
+      createImageBitmap(frame).then(bitmap => wk.postMessage({ type: 'frame', id, ts, bitmap }, [bitmap]), () => { wk.busy = false; ring[slot].pins--; pending.delete(id); });
     }
   } else if (mainFinder) {
-    const slot = slotNext++ % ring.length, t = performance.now();
-    ring[slot].upload(video, w, h);
-    pending.set(id, { slot, w, h, t });
-    const r = mainFinder.detectForVideo(video, ts);
-    onLandmarks({ id, ms: performance.now() - t, faces: r.faceLandmarks.map(L => Float32Array.from(L.flatMap(p => [p.x, p.y]))) });
+    ring[slot].pins++;
+    pending.set(id, { slot, w, h, t: now });
+    const r = mainFinder.detectForVideo(frame, ts);
+    onLandmarks({ id, ms: performance.now() - now, faces: r.faceLandmarks.map(L => Float32Array.from(L.flatMap(p => [p.x, p.y]))) });
   }
-  draw(w, h);
+  draw(w, h, frame);
 }
 
 function onLandmarks({ id, faces: raw, ms }) {
   const p = pending.get(id);
   pending.delete(id);
-  for (const k of pending.keys()) if (k < id - 64) pending.delete(k);
   if (!p) return;
+  const fr = ring[p.slot];
+  try { score(id, p, fr, raw, ms); } finally { fr.pins--; }
+}
+
+function score(id, p, fr, raw, ms) {
   stats.det.tick(performance.now()); stats.detMs.add(ms);
   if (id < facesId) return; // a later frame already reported
   const found = raw.map(a => faceFrom(a, p.w, p.h)).filter(believable).sort((a, b) => b.span - a.span).slice(0, +$('faces').value);
   faces = found; facesId = id;
   if (!found.length) graphs.push(performance.now(), null);
   if (!found.length || !engine.idle()) return;
-  const fr = ring[p.slot];
   const crops = found.map(f => [cropParams(EXP, p.w, p.h, f.e, f.m), cropParams(AGE, p.w, p.h, f.e, f.m)]);
   const lvl = Math.max(...crops.flat().map(c => c.lvl));
   const sent = found.map(f => ({ e: f.e, m: f.m })), t1 = performance.now();
@@ -179,7 +204,7 @@ function match(f) {
   return best && bd < f.span ? best : null;
 }
 
-function draw(w, h) {
+function draw(w, h, src) {
   const mirror = $('mirror').checked, X = x => mirror ? w - x : x;
   ctx.clearRect(0, 0, w, h);
   const k = w / 1280;
@@ -200,7 +225,7 @@ function draw(w, h) {
       lines.push([`${top[0]} ${Math.round(top[1] * 100)}%`, 'Mood']);
     } else lines.push(['…', 'Scoring']);
     drawCard(bx, y1 + 8 * k, Math.max(bw, 190 * k), lines, k);
-    if ($('crops').checked) drawCrops(f, i, w, h, k);
+    if ($('crops').checked) drawCrops(f, i, w, h, k, src);
   });
 }
 
@@ -221,7 +246,7 @@ function drawCard(x, y, W, lines, k) {
 }
 
 // What the nets are fed: the same similarity crop, drawn with canvas here just for display.
-function drawCrops(f, i, w, h, k) {
+function drawCrops(f, i, w, h, k, src) {
   const S = 96 * k, y = 8 * k + i * (S + 8 * k);
   [EXP, AGE].forEach((t, j) => {
     const x = 8 * k + j * (S + 8 * k), g = transform(t, f.e, f.m), sc = S / t.S;
@@ -229,7 +254,7 @@ function drawCrops(f, i, w, h, k) {
     ctx.beginPath(); ctx.rect(x, y, S, S); ctx.clip();
     ctx.fillStyle = '#000'; ctx.fillRect(x, y, S, S);
     ctx.setTransform(g.re * sc, g.im * sc, -g.im * sc, g.re * sc, x + g.tx * sc, y + g.ty * sc);
-    ctx.drawImage(video, 0, 0, w, h);
+    ctx.drawImage(src, 0, 0, w, h);
     ctx.restore();
     ctx.strokeStyle = 'rgba(255,255,255,.5)'; ctx.lineWidth = 1; ctx.strokeRect(x + .5, y + .5, S - 1, S - 1);
   });
@@ -253,7 +278,7 @@ async function start() {
     say('Opening camera…');
     await openCamera();
     stage.dataset.state = 'live'; $('hud').hidden = false; $('graphs').hidden = !$('showGraphs').checked;
-    running = true; video.requestVideoFrameCallback(onFrame); hud();
+    running = true; hud();
   } catch (err) {
     console.error(err);
     say(String(err.message || err));
@@ -265,8 +290,6 @@ $('start').addEventListener('click', start);
 for (const id of ['res', 'src']) $(id).addEventListener('change', () => { if (running) openCamera().catch(err => say(String(err))); });
 $('workers').addEventListener('change', () => { if (engine) setWorkers(+$('workers').value); });
 $('showGraphs').addEventListener('change', () => { if (running) $('graphs').hidden = !$('showGraphs').checked; });
-$('mirror').addEventListener('change', () => { stage.dataset.mirror = $('mirror').checked ? '1' : '0'; });
-stage.dataset.mirror = '1';
 // ?src=demo&workers=2&res=1280x720&faces=1&autostart=1 (handy for benchmarking)
 const qp = new URLSearchParams(location.search);
 for (const k of ['src', 'workers', 'res', 'faces']) if (qp.has(k)) $(k).value = qp.get(k);

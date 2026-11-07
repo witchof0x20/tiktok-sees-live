@@ -15,8 +15,7 @@ h1 span { color: var(--accent); font-weight: 500; }
 header p { margin: 0; color: var(--muted); font-size: 13px; }
 
 .stage { position: relative; background: #000; border-radius: 16px; overflow: hidden; aspect-ratio: 16 / 9; }
-.stage video, .stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
-.stage[data-mirror="1"] video { transform: scaleX(-1); }
+.stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
 .cover { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 10px; color: #eee; background: radial-gradient(circle at 50% 40%, #222 0, #000 70%); }
 .stage[data-state="live"] .cover { display: none; }
 .cover p { margin: 0; font-size: 13px; color: #aaa; max-width: 46ch; text-align: center; min-height: 1.4em; }
