@@ -295,4 +295,4 @@ const qp = new URLSearchParams(location.search);
 for (const k of ['src', 'workers', 'res', 'faces']) if (qp.has(k)) $(k).value = qp.get(k);
 if (qp.has('autostart') && $('src').value === 'demo') start();
 if (!navigator.gpu) say('This needs WebGPU. On Linux Chrome, enable chrome://flags/#enable-unsafe-webgpu (and Vulkan).');
-window.__live = { stats, get faces() { return faces; }, get scored() { return scored; }, get engine() { return engine; }, get workers() { return workers.length; } };
+window.__live = { stats, get device() { return device; }, get display() { return display; }, get ring() { return ring; }, get faces() { return faces; }, get scored() { return scored; }, get engine() { return engine; }, get workers() { return workers.length; } };

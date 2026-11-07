@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Face models check</title>
+<style>body{font:14px/1.4 ui-monospace,monospace;margin:16px;background:#111;color:#ddd}pre{white-space:pre-wrap}</style>
+<script type="module">
+// GPU float engine vs the CPU reference interpreter, on the converted face detector and landmark models.
+import { requestDevice, createProgram } from '../gpu/engine.js';
+import { runFloatRef } from '../gpu/fref.js';
+const el = document.getElementById('log'), log = t => { el.textContent += t + '\n'; console.log(t); };
+const q = new URLSearchParams(location.search), opt = JSON.parse(q.get('opt') || '{}');
+const MODELS = { face_detector: ['t160', 't163', 't166', 't169'], face_landmarks: ['t472', 't473'] };
+const load = async n => { const [ir, buf] = await Promise.all([fetch(`../models/${n}.json`).then(r => r.json()), fetch(`../models/${n}.bin`).then(r => r.arrayBuffer())]); return { ir, buf, wanted: MODELS[n], dtype: 'f32' }; };
+const rnd = (n, seed, lo, hi) => { let s = seed >>> 0; const a = new Float32Array(n); for (let i = 0; i < n; i++) { s = (s * 1664525 + 1013904223) >>> 0; a[i] = lo + (hi - lo) * s / 2 ** 32; } return a; };
+try {
+  const { device } = await requestDevice();
+  let worst = 0;
+  for (const name of Object.keys(MODELS)) {
+    const spec = await load(name), d = spec.ir.nodes[0], [lo, hi] = d.range;
+    const prog = await createProgram(device, [spec], { maxBatch: 2, source: 'tensor', opt, label: name });
+    log(`${name}: ${prog.kernelCount} kernels / ${prog.dispatches} dispatches, compiled ${prog.compileMs.toFixed(0)} ms`);
+    // Two inputs in one batch: noise, and a smooth gradient image.
+    const n = d.H * d.W * d.C;
+    const inputs = [rnd(n, 7, lo, hi), Float32Array.from({ length: n }, (_, i) => lo + (hi - lo) * (0.5 + 0.5 * Math.sin(i * 0.0007 + (i % 3))))];
+    prog.upload(inputs.map(t => [t]));
+    const outs = MODELS[name].map(h => prog.output(0, h));
+    const bytes = Math.max(...outs.map(o => (o.off + 2 * o.CG * o.H * o.W) * 16));
+    const rb = device.createBuffer({ size: bytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    const enc = device.createCommandEncoder();
+    prog.encode(enc, { batch: [2] });
+    enc.copyBufferToBuffer(prog.act, 0, rb, 0, bytes);
+    device.queue.submit([enc.finish()]);
+    await rb.mapAsync(GPUMapMode.READ);
+    const g = new Float32Array(rb.getMappedRange().slice(0)); rb.unmap();
+    for (let b = 0; b < 2; b++) {
+      const R = runFloatRef(spec.ir, spec.buf, inputs[b]);
+      for (const [hi_, h] of MODELS[name].entries()) {
+        const o = outs[hi_], r = R.get(h);
+        let md = 0, mr = 0;
+        for (let y = 0; y < o.H; y++) for (let x = 0; x < o.W; x++) for (let c = 0; c < o.C; c++) {
+          const gv = g[((o.off + (b * o.CG + (c >> 2)) * o.H * o.W + y * o.W + x) * 4) + (c & 3)], rv = r[(y * o.W + x) * o.C + c];
+          md = Math.max(md, Math.abs(gv - rv)); mr = Math.max(mr, Math.abs(rv));
+        }
+        const rel = md / Math.max(mr, 1e-6);
+        worst = Math.max(worst, rel);
+        log(`  input ${b} ${h} [${o.H}x${o.W}x${o.C}]: max |gpu-ref| ${md.toExponential(2)} (relative ${rel.toExponential(2)}, |ref| up to ${mr.toFixed(2)})`);
+      }
+    }
+    prog.destroy();
+  }
+  log(worst < 1e-4 ? `OK: worst relative error ${worst.toExponential(2)}` : `TOO FAR: worst relative error ${worst.toExponential(2)}`);
+  window.__vf = { worst };
+} catch (e) { log(String(e.stack || e)); window.__vf = { error: String(e) }; }
+</script></head>
+<body><pre id="log"></pre></body>
+</html>

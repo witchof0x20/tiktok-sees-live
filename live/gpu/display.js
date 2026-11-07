@@ -1,6 +1,6 @@
 // Draws a frame texture to a WebGPU canvas (optionally mirrored). Replaces <video> for the preview: on some
 // Linux/Vulkan Chrome setups a <video> element shows camera frames as blank, while VideoFrames are fine.
-const SHADER = `struct U { mirror: f32, pad: vec3<f32> }
+const SHADER = `struct U { mirror: f32, p0: f32, p1: f32, p2: f32 }
 @group(0) @binding(0) var tex: texture_2d<f32>;
 @group(0) @binding(1) var smp: sampler;
 @group(0) @binding(2) var<uniform> u: U;
