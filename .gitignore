@@ -1,2 +1,6 @@
 result
 node_modules/
+# Local-only mirror of ayoships.com/tools/tiktok-face (tools/fetch-upstream.sh); not redistributed.
+/upstream/
+# Extracted from live/vendor/face_landmarker.task by tools/convert steps; regenerate locally.
+/live/models/src/

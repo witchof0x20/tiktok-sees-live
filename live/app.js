@@ -7,13 +7,16 @@
 // exact frame it came from (a pinned ring slot).
 import { requestDevice, createEngine, createProgram, expScores, ageScores } from './gpu/engine.js';
 import { runTail } from './gpu/graph.js';
-import { FaceFinder, OUT_FLOATS } from './gpu/facefinder.js';
+import { FaceFinder, OUT_FLOATS, MODELS as FACE_MODELS, loadModel } from './gpu/facefinder.js';
+import { tune } from './gpu/tune.js';
 import { FrameTexture, EXP, AGE, cropParams, transform } from './gpu/frame.js';
 import { Display } from './gpu/display.js';
 import { Graphs } from './graphs.js';
 
-const VENDOR = new URL('/upstream/tools/tiktok-face/vendor/', location.href).href;
-const NETS = '/upstream/tools/tiktok-face/';
+const VENDOR = new URL('vendor/', location.href).href;
+const NETS = 'nets/';
+// The demo source uses the original tool's sample photo, which isn't redistributed (tools/fetch-upstream.sh fetches it).
+const SAMPLE = '../upstream/tools/tiktok-face/sample.jpg';
 const MOOD = ['Angry', 'Disgust', 'Fear', 'Happy', 'Sad', 'Surprise', 'Neutral'];
 const MIN_AGE = 16, MAX_FACES = 4;
 const WANT = { expnet: ['predict_attractive', 'prob_exp', 'predict_valence', 'predict_arousal'], agenet: ['predict_age', 'prob_gender'] };
@@ -21,6 +24,7 @@ const WANT = { expnet: ['predict_attractive', 'prob_exp', 'predict_valence', 'pr
 const $ = id => document.getElementById(id);
 const view = $('view'), overlay = $('overlay'), ctx = overlay.getContext('2d'), stage = $('stage');
 const say = t => { $('status').textContent = t; };
+const qp = new URLSearchParams(location.search);
 const graphs = new Graphs($('graphs'));
 
 function Rate() { this.t = []; this.tick = now => { this.t.push(now); while (this.t.length && now - this.t[0] > 1000) this.t.shift(); }; this.value = () => this.t.length > 1 ? (this.t.length - 1) * 1000 / (this.t[this.t.length - 1] - this.t[0]) : 0; }
@@ -80,22 +84,66 @@ async function setWorkers(n) {
   $('finder').textContent = workers.length ? `${workers.length} worker${workers.length > 1 ? 's' : ''}` : 'main thread';
 }
 
+// Tuning: a bundled full tuning file for this GPU architecture if there is one, else a plan tuned on this device
+// (cached per adapter), else a one-time quick tune seeded with the bundled file's fusion groups (a few seconds on a
+// desktop GPU). TUNE_VERSION invalidates cached plans when kernels change.
+const SEED = 'tuned/rdna-3.json', TUNE_VERSION = 1;
+const cacheKey = () => `tiktok-sees-live:plan:v${TUNE_VERSION}:${adapterInfo.vendor}|${adapterInfo.architecture}|${adapterInfo.description}|${device.limits.maxComputeWorkgroupStorageSize}`;
+const fetchJson = url => fetch(url).then(r => r.ok ? r.json() : null).catch(() => null);
+let planLabel = 'untuned';
+
+async function quickTune() {
+  const faceSpecs = await Promise.all(Object.keys(FACE_MODELS).map(n => loadModel('models/', n)));
+  const seed = await fetchJson(SEED);
+  const ac = new AbortController();
+  $('skipTune').hidden = false;
+  $('skipTune').onclick = () => ac.abort();
+  try {
+    const plan = await tune(device, [...specs, ...faceSpecs], { quick: true, seed, signal: ac.signal,
+      onProgress: f => say(`Optimizing for this GPU, one time only: ${Math.round(100 * f)}%`) });
+    try { localStorage.setItem(cacheKey(), JSON.stringify(plan)); } catch {}
+    return plan;
+  } catch (err) {
+    if (!ac.signal.aborted) console.warn('quick tuning failed', err);
+    return null;
+  } finally { $('skipTune').hidden = true; }
+}
+
+async function buildPrograms(plan) {
+  finder?.det.destroy(); finder?.lm.destroy(); tiktok?.destroy();
+  finder = await FaceFinder.create(device, { base: 'models/', tuned: plan });
+  tiktok = await createProgram(device, specs, { maxBatch: MAX_FACES, source: 'texture', tuned: plan, batchBuffer: finder.ttBatch, cropsBuffer: finder.ttCrops, label: 'tiktok' });
+}
+
 async function init() {
   say('Starting WebGPU…');
   ({ device, info: adapterInfo } = await requestDevice());
   device.lost.then(l => say(`GPU device lost: ${l.message}`));
   say('Loading nets…');
   specs = await Promise.all([loadSpec('expnet'), loadSpec('agenet')]);
-  try { const r = await fetch(`tuned/${adapterInfo.architecture || 'default'}.json`); if (r.ok) tuned = await r.json(); } catch {}
-  say(`Compiling fused kernels${tuned ? ' (tuned for ' + adapterInfo.architecture + ')' : ''}…`);
-  finder = await FaceFinder.create(device, { base: 'models/', tuned });
-  tiktok = await createProgram(device, specs, { maxBatch: MAX_FACES, source: 'texture', tuned, batchBuffer: finder.ttBatch, cropsBuffer: finder.ttCrops, label: 'tiktok' });
+  let plan = null;
+  if (!qp.has('notune')) {
+    if (!qp.has('nobundle')) plan = await fetchJson(`tuned/${adapterInfo.architecture || 'none'}.json`);
+    if (plan) planLabel = `autotuned for ${adapterInfo.architecture}`;
+    if (!plan) { try { plan = JSON.parse(localStorage.getItem(cacheKey())); } catch {} if (plan) planLabel = 'tuned on this device'; }
+    if (!plan) { plan = await quickTune(); if (plan) planLabel = 'tuned on this device'; }
+  }
+  tuned = plan;
+  say('Compiling fused kernels…');
+  try { await buildPrograms(plan); }
+  catch (err) {
+    // A plan that doesn't fit this device (e.g. less workgroup memory): drop it and use the untuned default.
+    console.warn('tuned plan unusable here, using the default', err);
+    try { localStorage.removeItem(cacheKey()); } catch {}
+    tuned = null; planLabel = 'untuned';
+    await buildPrograms(null);
+  }
   gpuFrame = new FrameTexture(device);
   const bytes = OUT_FLOATS * 4 + tiktok.sumLen * 4;
   readRing = Array.from({ length: 3 }, () => ({ buf: device.createBuffer({ size: Math.ceil(bytes / 16) * 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }), busy: false }));
   display = new Display(device, view);
   const k = finder.det.kernelCount + finder.lm.kernelCount + tiktok.kernelCount + 2, d = finder.det.dispatches + finder.lm.dispatches + tiktok.dispatches + 4;
-  $('engine').textContent = `${adapterInfo.vendor} ${adapterInfo.architecture} · face detector + landmarks + both TikTok nets: ${k} kernels, ${d} dispatches per frame, one submit · ${tuned ? 'autotuned' : 'heuristic'} plan · TikTok nets bit-exact int16 fixed point`;
+  $('engine').textContent = `${adapterInfo.vendor} ${adapterInfo.architecture} · face detector + landmarks + both TikTok nets: ${k} kernels, ${d} dispatches per frame, one submit · ${planLabel} · TikTok nets bit-exact int16 fixed point`;
   await setMode();
 }
 
@@ -111,7 +159,7 @@ async function setMode() {
 // Demo source: upstream's sample photo drifting and turning, as a 60 fps stream through the same path as a camera.
 let demoTimer = 0;
 async function demoStream(w, h) {
-  const img = new Image(); img.src = NETS + 'sample.jpg'; await img.decode();
+  const img = new Image(); img.src = SAMPLE; await img.decode();
   const c = Object.assign(document.createElement('canvas'), { width: w, height: h }), x = c.getContext('2d');
   const t0 = performance.now();
   const paint = () => {
@@ -128,20 +176,41 @@ async function openCamera() {
   stream?.getTracks().forEach(t => t.stop());
   const [w, h] = $('res').value.split('x').map(Number);
   clearInterval(demoTimer);
-  stream = $('src').value === 'demo' ? await demoStream(w, h)
-    : await navigator.mediaDevices.getUserMedia({ audio: false, video: { width: { ideal: w }, height: { ideal: h }, frameRate: { ideal: 60 }, facingMode: 'user' } });
+  const src = $('src').value;
+  stream = src === 'demo' ? await demoStream(w, h)
+    : await navigator.mediaDevices.getUserMedia({ audio: false, video: { width: { ideal: w }, height: { ideal: h }, frameRate: { ideal: 60 }, facingMode: src === 'back' ? 'environment' : 'user' } });
   faces = []; scored = [];
+  finder?.reset();
   const track = stream.getVideoTracks()[0];
   reader?.cancel().catch(() => {});
-  const r = reader = new MediaStreamTrackProcessor({ track }).readable.getReader();
-  (async () => {
-    for (;;) {
-      const { value: frame, done } = await r.read().catch(() => ({ done: true }));
-      if (done || r !== reader) { frame?.close(); break; }
-      try { onFrame(frame); } catch (err) { console.error(err); } finally { frame.close(); }
-    }
-  })();
+  reader = null;
+  if (typeof MediaStreamTrackProcessor === 'function' && !qp.has('video')) {
+    // Frames straight off the track (also avoids a Linux/Vulkan Chrome bug where <video> shows camera frames blank).
+    const r = reader = new MediaStreamTrackProcessor({ track }).readable.getReader();
+    (async () => {
+      for (;;) {
+        const { value: frame, done } = await r.read().catch(() => ({ done: true }));
+        if (done || r !== reader) { frame?.close(); break; }
+        try { onFrame(frame, frame.displayWidth, frame.displayHeight, frame.timestamp); } catch (err) { console.error(err); } finally { frame.close(); }
+      }
+    })();
+  } else {
+    // Safari and others without MediaStreamTrackProcessor: an offscreen <video>, one callback per new frame.
+    const v = fallbackVideo;
+    v.srcObject = stream;
+    await v.play();
+    const loop = (now, meta) => {
+      if (v.srcObject !== stream) return;
+      try { onFrame(v, v.videoWidth, v.videoHeight, meta.mediaTime * 1e6); } catch (err) { console.error(err); }
+      v.requestVideoFrameCallback(loop);
+    };
+    v.requestVideoFrameCallback(loop);
+  }
 }
+const fallbackVideo = Object.assign(document.createElement('video'), { muted: true, playsInline: true });
+fallbackVideo.setAttribute('playsinline', '');
+fallbackVideo.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;left:0;top:0';
+document.body.append(fallbackVideo);
 
 function resize(w, h) {
   if (overlay.width === w && overlay.height === h) return;
@@ -151,14 +220,14 @@ function resize(w, h) {
 
 const pending = new Map(); // frame id -> { slot, w, h, t }
 
-function onFrame(frame) {
-  if (!running) return;
+// frame: a VideoFrame or a <video> showing the current frame; tsUs: its timestamp in microseconds.
+function onFrame(frame, w, h, tsUs) {
+  if (!running || !w || !h) return;
   const now = performance.now();
   stats.cam.tick(now);
-  const w = frame.displayWidth, h = frame.displayHeight;
   resize(w, h);
   if ($('finderMode').value === 'gpu') { onFrameGpu(frame, w, h, now); draw(w, h, frame); return; }
-  const ts = Math.max(lastTs + 1, Math.round(frame.timestamp / 1000)); lastTs = ts;
+  const ts = Math.max(lastTs + 1, Math.round(tsUs / 1000)); lastTs = ts;
   const id = ++frameId;
   // Ring slots stay pinned from capture until their nets are submitted; a frame with no free slot is dropped.
   let slot = -1;
@@ -259,7 +328,7 @@ function match(f) {
 function draw(w, h, src) {
   const mirror = $('mirror').checked, X = x => mirror ? w - x : x;
   ctx.clearRect(0, 0, w, h);
-  const k = w / 1280;
+  const k = Math.min(w, h) / 720; // overlay scale: same physical size in portrait and landscape
   faces.forEach((f, i) => {
     if ($('mesh').checked) {
       ctx.fillStyle = 'rgba(37,244,238,.6)';
@@ -339,13 +408,16 @@ async function start() {
 }
 
 $('start').addEventListener('click', start);
-for (const id of ['res', 'src']) $(id).addEventListener('change', () => { if (running) openCamera().catch(err => say(String(err))); });
+for (const id of ['res', 'src']) $(id).addEventListener('change', () => {
+  if (id === 'src') $('mirror').checked = $('src').value !== 'back';
+  if (running) openCamera().catch(err => say(String(err)));
+});
 $('workers').addEventListener('change', () => { if (engine && $('finderMode').value === 'mediapipe') setWorkers(+$('workers').value); });
 $('finderMode').addEventListener('change', () => { if (finder) setMode().catch(err => say(String(err))); });
 $('showGraphs').addEventListener('change', () => { if (running) $('graphs').hidden = !$('showGraphs').checked; });
 // ?src=demo&workers=2&res=1280x720&faces=1&autostart=1 (handy for benchmarking)
-const qp = new URLSearchParams(location.search);
 for (const k of ['src', 'workers', 'res', 'faces', 'finderMode']) if (qp.has(k)) $(k).value = qp.get(k);
 if (qp.has('autostart') && $('src').value === 'demo') start();
+fetch(SAMPLE, { method: 'HEAD' }).then(r => { if (!r.ok) throw 0; }).catch(() => $('src').querySelector('[value=demo]').remove());
 if (!navigator.gpu) say('This needs WebGPU. On Linux Chrome, enable chrome://flags/#enable-unsafe-webgpu (and Vulkan).');
 window.__live = { stats, get device() { return device; }, get display() { return display; }, get ring() { return ring; }, get faces() { return faces; }, get scored() { return scored; }, get engine() { return engine; }, get workers() { return workers.length; } };

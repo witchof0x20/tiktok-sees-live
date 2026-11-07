@@ -7,7 +7,7 @@
 import { requestDevice } from '../gpu/engine.js';
 import { FrameTexture } from '../gpu/frame.js';
 import { FaceFinder, N_LM, FACE_STRIDE, MAX_FACES } from '../gpu/facefinder.js';
-const V = '/upstream/tools/tiktok-face/vendor/';
+import { UP, VENDOR as V, requireUpstream } from './upstream.js';
 const el = document.getElementById('log'), log = t => { el.textContent += t + '\n'; console.log(t); };
 const q = new URLSearchParams(location.search);
 try {
@@ -37,7 +37,8 @@ try {
   const mpv = await FaceLandmarker.createFromOptions({ wasmLoaderPath: V + 'vision_wasm_internal.js', wasmBinaryPath: V + 'vision_wasm_internal.wasm' }, {
     baseOptions: { modelAssetPath: V + 'face_landmarker.task', delegate: 'GPU' }, runningMode: 'VIDEO', numFaces: 4, minFaceDetectionConfidence: 0.5, minFacePresenceConfidence: 0.6, minTrackingConfidence: 0.6 });
   let vts = 0;
-  const img = new Image(); img.src = '/upstream/tools/tiktok-face/sample.jpg'; await img.decode();
+  if (!await requireUpstream(log)) throw new Error('needs the sample photo');
+  const img = new Image(); img.src = UP + 'sample.jpg'; await img.decode();
   const cases = [];
   for (const [scale, deg, dx] of [[0.9, 0, 0], [0.5, 0, 0.2], [0.3, 0, -0.25], [0.9, 25, 0], [0.7, -40, 0.1], [1.2, 0, 0]]) cases.push({ name: `s${scale} r${deg}`, faces: [[scale, deg, dx]] });
   cases.push({ name: 'two faces', faces: [[0.45, 0, -0.22], [0.4, 10, 0.24]] });

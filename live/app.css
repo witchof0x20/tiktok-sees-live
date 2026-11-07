@@ -21,6 +21,7 @@ header p { margin: 0; color: var(--muted); font-size: 13px; }
 .cover p { margin: 0; font-size: 13px; color: #aaa; max-width: 46ch; text-align: center; min-height: 1.4em; }
 button { font: inherit; font-weight: 600; border: 0; border-radius: 999px; padding: 10px 22px; background: var(--accent); color: #fff; cursor: pointer; }
 button:disabled { opacity: .5; cursor: default; }
+button.ghost { background: transparent; color: #ccc; border: 1px solid #555; font-weight: 500; }
 button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--accent2); outline-offset: 2px; }
 
 .controls { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; padding: 12px 2px; font-size: 14px; color: var(--muted); }
@@ -37,8 +38,16 @@ select { font: inherit; color: var(--fg); background: var(--card); border: 1px s
 .foot a { color: inherit; }
 
 @media (max-width: 640px) {
+  main { padding: 12px 12px 32px; }
+  h1 { font-size: 19px; }
   .hud { grid-template-columns: repeat(2, 1fr); }
-  .stage { aspect-ratio: 3 / 4; }
+  .hud dd { font-size: 16px; }
+  .stage { aspect-ratio: 3 / 4; border-radius: 12px; }
+  .controls { gap: 8px 14px; }
+  /* iOS zooms into form controls under 16px on focus. */
+  select, button { font-size: 16px; }
+  .controls label { min-height: 36px; }
+  input[type="checkbox"] { width: 20px; height: 20px; }
 }
 
 /* Graphs: categorical slots validated for both modes (dataviz reference palette, slots 1-7). */
@@ -59,7 +68,7 @@ select { font: inherit; color: var(--fg); background: var(--card); border: 1px s
 .chart figcaption { display: flex; justify-content: space-between; align-items: baseline; font-size: 13px; color: var(--text-secondary); }
 .chart figcaption .v { font: 600 16px/1.2 var(--mono); color: var(--text-primary); font-variant-numeric: tabular-nums; }
 .chart .plot { position: relative; }
-.chart canvas { display: block; width: 100%; height: 110px; margin-top: 6px; cursor: crosshair; }
+.chart canvas { display: block; width: 100%; height: 110px; margin-top: 6px; cursor: crosshair; touch-action: pan-y; }
 .chart.wide canvas { height: 140px; }
 .chart .tip { position: absolute; top: 4px; pointer-events: none; background: var(--surface-1); color: var(--text-primary); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; font-size: 12px; box-shadow: 0 4px 14px rgba(0,0,0,.18); white-space: nowrap; z-index: 1; }
 .chart .tip .h { color: var(--text-secondary); margin-bottom: 2px; }

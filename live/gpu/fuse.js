@@ -14,6 +14,9 @@ export const DEFAULTS = {
   splits: [1, 2, 4, 8, 16],
   blocks: [[1, 1], [2, 1], [4, 1], [1, 2], [2, 2], [4, 2], [1, 4], [2, 4], [1, 8]],
   scheds: ['unit', 'px'],
+  // Without measurements, fusing by the cost model above loses to one op per kernel on the GPUs tried, so the
+  // greedy fusion pass is off by default; the autotuner (tune.js) makes fusion decisions from real timings.
+  fuse: false,
   load: 4,            // relative cost of a vec4 load
   mad: 4,             // relative cost of a vec4 integer multiply-add
 };

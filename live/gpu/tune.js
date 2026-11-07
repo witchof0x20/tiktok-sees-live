@@ -1,11 +1,18 @@
 // Measurement-driven autotuner. Times candidate kernels on the real GPU (many back-to-back dispatches between
 // two timestamps), then makes the same greedy fusion decisions as the planner, but on measured times.
+//
+// quick: the cheap on-device variant. Single-op kernels only (no fusion search), a few configs per op chosen for
+// variety (one per schedule x register-block shape), results shared between ops of identical shape, and wall-clock
+// timing when the GPU has no timestamp queries. Seconds on a desktop GPU instead of minutes. With a seed (a full tuning
+// file from another GPU) quick mode keeps its fusion groups and only re-picks each group's tile/split/block/schedule;
+// groups that can't run here (e.g. not enough workgroup memory) fall back to single ops.
 import { parseNet, packWeights, parseFloatNet, packFloatWeights } from './graph.js';
 import { candidates, DEFAULTS } from './fuse.js';
 import { moduleSource } from './codegen.js';
 
-export async function tune(device, specs, { opt: over = {}, topK = 24, reps = 40, overheadUs = 2, log = () => {} } = {}) {
-  if (!device.features.has('timestamp-query')) throw new Error('tuning needs timestamp-query');
+export async function tune(device, specs, { opt: over = {}, quick = false, seed = null, signal = null, topK = quick ? 4 : 24, reps = quick ? 16 : 40, overheadUs = 2, log = () => {}, onProgress = () => {} } = {}) {
+  const stamps = device.features.has('timestamp-query');
+  if (!stamps && !quick) throw new Error('full tuning needs timestamp-query');
   const opt = { ...DEFAULTS, sharedBytes: device.limits.maxComputeWorkgroupStorageSize, maxRecompute: 4, ...over };
   const nets = specs.map(s => s.dtype === 'f32' ? parseFloatNet(s.ir, s.wanted) : parseNet(s.spec, s.wanted));
   const packed = nets.map((n, i) => n.dtype === 'f32' ? packFloatWeights(n, specs[i].buf) : packWeights(n, specs[i].buf, { u24: opt.u24 !== false }));
@@ -24,13 +31,24 @@ export async function tune(device, specs, { opt: over = {}, topK = 24, reps = 40
   const bgl = device.createBindGroupLayout({ entries: [0, 1, 2, 3].map(b => ({ binding: b, visibility: GPUShaderStage.COMPUTE, buffer: { type: b === 0 ? 'read-only-storage' : b === 3 ? 'uniform' : 'storage' } })) });
   const layout = device.createPipelineLayout({ bindGroupLayouts: [bgl] });
   const bg = device.createBindGroup({ layout: bgl, entries: [wts, act, sums, cfg].map((buffer, binding) => ({ binding, resource: { buffer } })) });
-  const qs = device.createQuerySet({ type: 'timestamp', count: 2 });
-  const qRes = device.createBuffer({ size: 16, usage: U.QUERY_RESOLVE | U.COPY_SRC });
-  const qRead = device.createBuffer({ size: 16, usage: U.MAP_READ | U.COPY_DST });
+  const qs = stamps ? device.createQuerySet({ type: 'timestamp', count: 2 }) : null;
+  const qRes = stamps ? device.createBuffer({ size: 16, usage: U.QUERY_RESOLVE | U.COPY_SRC }) : null;
+  const qRead = stamps ? device.createBuffer({ size: 16, usage: U.MAP_READ | U.COPY_DST }) : null;
 
   async function time(pipeline, nwg) {
     const best = [];
     for (let r = 0; r < 3; r++) {
+      if (!stamps) {
+        const enc = device.createCommandEncoder(), pass = enc.beginComputePass();
+        pass.setPipeline(pipeline); pass.setBindGroup(0, bg);
+        for (let i = 0; i < reps; i++) pass.dispatchWorkgroups(nwg);
+        pass.end();
+        const t0 = performance.now();
+        device.queue.submit([enc.finish()]);
+        await device.queue.onSubmittedWorkDone();
+        best.push((performance.now() - t0) * 1e3 / reps);
+        continue;
+      }
       const enc = device.createCommandEncoder();
       const pass = enc.beginComputePass({ timestampWrites: { querySet: qs, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 } });
       pass.setPipeline(pipeline); pass.setBindGroup(0, bg);
@@ -49,11 +67,24 @@ export async function tune(device, specs, { opt: over = {}, topK = 24, reps = 40
 
   const memo = new Map();
   let measured = 0;
+  // Ops with the same shape and parameters time the same; quick mode measures each shape once.
+  const shapeKey = (ni, n) => JSON.stringify([nets[ni].dtype, n.op, n.C, n.H, n.W, n.k, n.s, n.p, n.act, !!n.u24, n.toGap, n.ins.map(x => [x.op === 'data', x.C, x.H, x.W])]);
+  // A fused group's key: each member's shape plus how members connect (inside the group or from outside).
+  const groupKey = (ni, members) => {
+    const list = [...members].sort((a, b) => a.idx - b.idx), pos = new Map(list.map((m, i) => [m, i]));
+    return JSON.stringify(list.map(m => [shapeKey(ni, m), m.ins.map(x => pos.has(x) ? pos.get(x) : -1)]));
+  };
+  const variety = list => {
+    const seen = new Set(), out = [];
+    for (const c of list) { const k = `${c.sched}:${c.P}x${c.Q}`; if (!seen.has(k)) { seen.add(k); out.push(c); } if (out.length >= topK) break; }
+    return out;
+  };
   // Best measured config for a group; null if nothing compiles or fits.
   async function measureGroup(ni, members, F) {
-    const key = `${ni}:${F.name}:${[...members].map(m => m.idx).sort((a, b) => a - b).join(',')}`;
+    signal?.throwIfAborted();
+    const key = quick ? groupKey(ni, members) : `${ni}:${F.name}:${[...members].map(m => m.idx).sort((a, b) => a - b).join(',')}`;
     if (memo.has(key)) return memo.get(key);
-    const cands = candidates(members, F, opt).slice(0, topK);
+    const all = candidates(members, F, opt), cands = quick ? variety(all) : all.slice(0, topK);
     // Scratch placement: every external input, then the output.
     let off = 0;
     const ext = new Set();
@@ -81,21 +112,37 @@ export async function tune(device, specs, { opt: over = {}, topK = 24, reps = 40
       if (!best || us < best.us) best = { plan: b.plan, us };
     }
     memo.set(key, best);
+    if (quick) onProgress(memo.size / totalShapes);
     return best;
   }
+  // Seeded groups per net (member sets), else single ops; used for quick mode's progress estimate and its work list.
+  const seededGroups = (net, ni) => {
+    const want = seed?.nets?.[net.name];
+    if (!want) return net.order.filter(n => n.op !== 'data').map(n => ({ F: n, members: new Set([n]) }));
+    const covered = new Set(want.flatMap(g => g.members));
+    const gs = want.filter(g => net.nodes.has(g.F)).map(g => ({ F: net.nodes.get(g.F), members: new Set(g.members.map(m => net.nodes.get(m)).filter(Boolean)) }));
+    for (const n of net.order) if (n.op !== 'data' && !covered.has(n.name)) gs.push({ F: n, members: new Set([n]) });
+    return gs;
+  };
+  const totalShapes = quick ? new Set(nets.flatMap((net, ni) => seededGroups(net, ni).map(g => groupKey(ni, g.members)))).size : 0;
 
   const result = { opt: { wg: opt.wg, u24: opt.u24 !== false }, nets: {}, totalUs: 0 };
   for (let ni = 0; ni < nets.length; ni++) {
     const net = nets[ni], groupOf = new Map(), groups = new Set();
-    for (const n of net.order) {
-      if (n.op === 'data') continue;
-      const members = new Set([n]), m = await measureGroup(ni, members, n);
-      if (!m) throw new Error(`nothing runs for ${n.name}`);
-      const g = { members, F: n, ...m };
-      groups.add(g); groupOf.set(n, g);
-    }
+    const add = async (members, F) => {
+      const m = await measureGroup(ni, members, F);
+      if (!m) {
+        if (members.size === 1) throw new Error(`nothing runs for ${F.name}`);
+        for (const n of members) await add(new Set([n]), n); // seeded group doesn't fit this GPU: split it
+        return;
+      }
+      const g = { members, F, ...m };
+      groups.add(g);
+      for (const n of members) groupOf.set(n, g);
+    };
+    for (const g of quick ? seededGroups(net, ni) : net.order.filter(n => n.op !== 'data').map(n => ({ F: n, members: new Set([n]) }))) await add(g.members, g.F);
     log(`${net.name}: ${groups.size} single-op kernels, ${[...groups].reduce((a, g) => a + g.us, 0).toFixed(0)} us`);
-    for (let round = 1, changed = true; changed; round++) {
+    for (let round = 1, changed = !quick; changed; round++) {
       changed = false;
       for (const g of [...groups].sort((a, b) => b.F.idx - a.F.idx)) {
         if (!groups.has(g)) continue;
@@ -123,6 +170,8 @@ export async function tune(device, specs, { opt: over = {}, topK = 24, reps = 40
     result.nets[net.name] = list.map(g => ({ F: g.F.name, members: [...g.members].sort((a, b) => a.idx - b.idx).map(m => m.name), T: g.plan.T, S: g.plan.S, P: g.plan.P, Q: g.plan.Q, sched: g.plan.sched, us: +g.us.toFixed(2) }));
     result.totalUs += list.reduce((a, g) => a + g.us, 0);
   }
-  [wts, act, sums, cfg, qRes, qRead].forEach(b => b.destroy());
+  [wts, act, sums, cfg, qRes, qRead].forEach(b => b?.destroy());
+  result.quick = quick;
+  result.timer = stamps ? 'timestamp' : 'wall';
   return result;
 }

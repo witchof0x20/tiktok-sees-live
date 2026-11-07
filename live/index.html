@@ -20,12 +20,14 @@
     <canvas id="overlay"></canvas>
     <div class="cover" id="cover">
       <button type="button" id="start">Start camera</button>
+      <button type="button" id="skipTune" class="ghost" hidden>Skip for now</button>
       <p id="status" role="status"></p>
     </div>
   </section>
   <section class="controls" aria-label="Options">
     <label>Source <select id="src">
-      <option value="camera" selected>Camera</option>
+      <option value="camera" selected>Front camera</option>
+      <option value="back">Back camera</option>
       <option value="demo">Demo (sample photo)</option>
     </select></label>
     <label>Camera <select id="res">
@@ -60,7 +62,7 @@
     <div><dt>Max faces</dt><dd>4 per submit</dd></div>
     <div class="wide"><dt>Engine</dt><dd id="engine">–</dd></div>
   </section>
-  <p class="foot">Based on <a href="/upstream/tools/tiktok-face/">ayoships.com/tools/tiktok-face</a> · not affiliated with TikTok</p>
+  <p class="foot">A live, GPU-accelerated take on <a href="https://ayoships.com/tools/tiktok-face">What TikTok sees</a> by <a href="https://ayoships.com">Ayo</a>, who decoded TikTok's face networks and built the original tool. Not affiliated with TikTok. <a href="https://github.com/witchof0x20/tiktok-sees-live">Source</a></p>
 </main>
 </body>
 </html>

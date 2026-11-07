@@ -5,7 +5,7 @@
 <script type="module">
 import { requestDevice } from '../gpu/engine.js';
 import { tune } from '../gpu/tune.js';
-const BASE = '/upstream/tools/tiktok-face/';
+const BASE = '../nets/';
 const WANT = { expnet: ['predict_attractive', 'prob_exp', 'predict_valence', 'predict_arousal'], agenet: ['predict_age', 'prob_gender'] };
 const load = async name => { const [spec, buf] = await Promise.all([fetch(BASE + name + '.json').then(r => r.json()), fetch(BASE + name + '.bin').then(r => r.arrayBuffer())]); return { spec, buf, wanted: WANT[name] }; };
 const el = document.getElementById('log'), log = t => { el.textContent += t + '\n'; console.log(t); };
@@ -15,9 +15,12 @@ try {
   log(`adapter ${info.vendor} ${info.architecture}`);
   // ?nets=face selects the converted face models; default is the TikTok nets.
   const loadF = async n => { const [ir, buf] = await Promise.all([fetch(`../models/${n}.json`).then(r => r.json()), fetch(`../models/${n}.bin`).then(r => r.arrayBuffer())]); return { ir, buf, dtype: 'f32', wanted: { face_detector: ['t160', 't163', 't166', 't169'], face_landmarks: ['t472', 't473'] }[n] }; };
-  const specs = q.get('nets') === 'face' ? await Promise.all([loadF('face_detector'), loadF('face_landmarks')]) : await Promise.all([load('expnet'), load('agenet')]);
+  const which = q.get('nets');
+  const specs = which === 'face' ? await Promise.all([loadF('face_detector'), loadF('face_landmarks')]) : which === 'all' ? await Promise.all([load('expnet'), load('agenet'), loadF('face_detector'), loadF('face_landmarks')]) : await Promise.all([load('expnet'), load('agenet')]);
   const t0 = performance.now();
-  const res = await tune(device, specs, { opt: JSON.parse(q.get('opt') || '{}'), topK: +(q.get('k') || 24), log });
+  const quick = q.has('quick');
+  const seed = q.has('seed') ? await fetch(q.get('seed')).then(r => r.json()) : null;
+  const res = await tune(device, specs, { opt: JSON.parse(q.get('opt') || '{}'), quick, seed, ...(q.has('k') ? { topK: +q.get('k') } : {}), log });
   res.adapter = { vendor: info.vendor, architecture: info.architecture };
   log(`done in ${((performance.now() - t0) / 1000).toFixed(0)} s; total ${res.totalUs.toFixed(0)} us`);
   window.__tune = res;

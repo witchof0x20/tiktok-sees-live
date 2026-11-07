@@ -204,7 +204,7 @@ ${lines.join('\n')}
   return {
     encode, readTimes, output, upload, nets, specs, stages, compileMs, act, sums, sumLen, crops, maxBatch, canTime,
     kernelCount: groups.reduce((a, g) => a + g.length, 0), dispatches: stages.length, arenaBytes: arenaVec * 16, weightBytes: wLen * 16,
-    destroy() { [wts, act, sums, crops, args, qRes, qRead, ...(batchBuffer ? [] : [cfg])].forEach(b => b?.destroy()); },
+    destroy() { [wts, act, sums, args, qRes, qRead, ...(batchBuffer ? [] : [cfg]), ...(cropsBuffer ? [] : [crops])].forEach(b => b?.destroy()); },
   };
 }
 

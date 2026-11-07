@@ -14,8 +14,8 @@ export const N_LM = 478;
 export const FACE_STRIDE = 16 + 2 * N_LM; // floats per face in the output block
 export const OUT_FLOATS = 4 + MAX_FACES * FACE_STRIDE;
 
-const MODELS = { face_detector: ['t160', 't163', 't166', 't169'], face_landmarks: ['t472', 't473'] };
-async function loadModel(base, name) {
+export const MODELS = { face_detector: ['t160', 't163', 't166', 't169'], face_landmarks: ['t472', 't473'] };
+export async function loadModel(base, name) {
   const [ir, buf] = await Promise.all([fetch(`${base}${name}.json`).then(r => r.json()), fetch(`${base}${name}.bin`).then(r => r.arrayBuffer())]);
   return { ir, buf, wanted: MODELS[name], dtype: 'f32' };
 }

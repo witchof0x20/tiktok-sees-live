@@ -1,13 +1,13 @@
 // Bit-exactness check: the reference CPU engine and the fused WebGPU engine must agree on every output.
 import { requestDevice, createEngine } from '../gpu/engine.js';
-import { makePhoto, drawCrop, EXP, AGE, findFaces } from '/upstream/tools/tiktok-face/face.js';
+import { UP, NETS, requireUpstream, loadReferenceEngine } from './upstream.js';
+let makePhoto, drawCrop, EXP, AGE, findFaces; // from upstream face.js, loaded when available
 
-const BASE = '/upstream/tools/tiktok-face/';
 const log = (t, cls) => { const el = document.getElementById('log'); if (el.textContent === 'running…') el.textContent = ''; const s = document.createElement('span'); if (cls) s.className = cls; s.textContent = t + '\n'; el.append(s); console.log(t); };
 const WANT = { expnet: ['predict_attractive', 'prob_exp', 'predict_valence', 'predict_arousal', 'predict_happy'], agenet: ['predict_age', 'prob_gender'] };
 
 async function load(name) {
-  const [spec, buf] = await Promise.all([fetch(BASE + name + '.json').then(r => r.json()), fetch(BASE + name + '.bin').then(r => r.arrayBuffer())]);
+  const [spec, buf] = await Promise.all([fetch(NETS + name + '.json').then(r => r.json()), fetch(NETS + name + '.bin').then(r => r.arrayBuffer())]);
   return { spec, buf, wanted: WANT[name] };
 }
 function tensorOf(t, p, e, m) {
@@ -30,6 +30,9 @@ const same = (a, b) => a.length === b.length && a.every((v, i) => Object.is(v, b
 
 (async () => {
   try {
+    if (!await requireUpstream(log)) { window.__verify = { skipped: true }; return; }
+    await loadReferenceEngine();
+    ({ makePhoto, drawCrop, EXP, AGE, findFaces } = await import(UP + 'face.js'));
     const { device, info } = await requestDevice();
     log(`adapter: ${info.vendor} ${info.architecture} ${info.description || ''}`);
     const specs = await Promise.all([load('expnet'), load('agenet')]);
@@ -40,7 +43,7 @@ const same = (a, b) => a.length === b.length && a.every((v, i) => Object.is(v, b
     log(`compiled ${eng.kernelCount} kernels into ${eng.dispatches} dispatches in ${eng.compileMs.toFixed(0)} ms; arena ${(eng.arenaBytes / 1024).toFixed(0)} KiB, weights ${(eng.weightBytes / 1024).toFixed(0)} KiB`);
 
     const cases = [];
-    const img = new Image(); img.src = BASE + 'sample.jpg'; await img.decode();
+    const img = new Image(); img.src = UP + 'sample.jpg'; await img.decode();
     const photo = makePhoto(img), faces = await findFaces(photo);
     log(`sample.jpg faces: ${faces.length}`);
     for (const f of faces) cases.push({ name: 'sample face', t: [tensorOf(EXP, photo, f.e, f.m), tensorOf(AGE, photo, f.e, f.m)] });

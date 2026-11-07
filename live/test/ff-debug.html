@@ -6,12 +6,13 @@
 import { requestDevice } from '../gpu/engine.js';
 import { FrameTexture } from '../gpu/frame.js';
 import { FaceFinder } from '../gpu/facefinder.js';
+import { UP } from './upstream.js';
 const el = document.getElementById('log'), log = t => { el.textContent += t + '\n'; };
 try {
   const { device } = await requestDevice();
   const ff = await FaceFinder.create(device, { base: '../models/' });
   const frame = new FrameTexture(device);
-  const img = new Image(); img.src = '/upstream/tools/tiktok-face/sample.jpg'; await img.decode();
+  const img = new Image(); img.src = UP + 'sample.jpg'; await img.decode();
   const cv = Object.assign(document.createElement('canvas'), { width: 1280, height: 720 }), x = cv.getContext('2d');
   x.fillStyle = '#3a3f4a'; x.fillRect(0, 0, 1280, 720); x.drawImage(img, 640 - 324, 36, 648, 648);
   frame.upload(cv, 1280, 720);

@@ -1,14 +1,14 @@
 // Benchmarks: reference CPU engine vs fused GPU engine. Query: ?opt={...planner overrides}&batch=1&ref=0
 import { requestDevice, createEngine } from '../gpu/engine.js';
 import { FrameTexture, EXP, AGE, cropParams } from '../gpu/frame.js';
+import { UP, NETS, loadReferenceEngine } from './upstream.js';
 
-const BASE = '/upstream/tools/tiktok-face/';
 const q = new URLSearchParams(location.search);
 const useTuned = !!q.get('tuned'), opt = JSON.parse(q.get('opt') || '{}'), batch = +(q.get('batch') || 1), runRef = q.get('ref') !== '0', iters = +(q.get('iters') || 200);
 const lines = [];
 const log = t => { lines.push(t); document.getElementById('log').textContent = lines.join('\n'); console.log(t); };
 const WANT = { expnet: ['predict_attractive', 'prob_exp', 'predict_valence', 'predict_arousal'], agenet: ['predict_age', 'prob_gender'] };
-const load = async name => { const [spec, buf] = await Promise.all([fetch(BASE + name + '.json').then(r => r.json()), fetch(BASE + name + '.bin').then(r => r.arrayBuffer())]); return { spec, buf, wanted: WANT[name] }; };
+const load = async name => { const [spec, buf] = await Promise.all([fetch(NETS + name + '.json').then(r => r.json()), fetch(NETS + name + '.bin').then(r => r.arrayBuffer())]); return { spec, buf, wanted: WANT[name] }; };
 const noise = (S, seed) => { let s = seed; const o = new Int16Array(S * S * 3); for (let i = 0; i < o.length; i++) { s = (s * 1664525 + 1013904223) >>> 0; o[i] = (s >>> 24) - 128; } return o; };
 const median = a => { const b = [...a].sort((x, y) => x - y); return b[b.length >> 1]; };
 
@@ -19,7 +19,7 @@ const median = a => { const b = [...a].sort((x, y) => x - y); return b[b.length 
     const specs = await Promise.all([load('expnet'), load('agenet')]);
     log(`adapter ${info.vendor} ${info.architecture}; opt ${JSON.stringify(opt)}; batch ${batch}`);
     const inputs = Array.from({ length: batch }, (_, b) => [noise(256, b + 1), noise(224, b + 9)]);
-    if (runRef) {
+    if (runRef && await loadReferenceEngine().then(() => true, () => (log('reference engine not available (tools/fetch-upstream.sh); skipping it'), false))) {
       const ref = specs.map(s => new self.FaceNet.Net(s.spec, s.buf));
       ref[0].run(inputs[0][0]); ref[1].run(inputs[0][1]);
       const t = [];
@@ -36,8 +36,10 @@ const median = a => { const b = [...a].sort((x, y) => x - y); return b[b.length 
     if (q.get('path') !== 'tensor') {
       eng.destroy();
       const live = await createEngine(device, specs, { maxBatch: Math.max(batch, 1), source: 'texture', opt, tuned });
-      const frame = new FrameTexture(device), img = new Image(); img.src = BASE + 'sample.jpg'; await img.decode();
-      const bmp = await createImageBitmap(img, { resizeWidth: 1280, resizeHeight: 720 });
+      // Pixel content doesn't change the cost; a synthetic frame stands in for a camera frame.
+      const frame = new FrameTexture(device), cv = Object.assign(document.createElement('canvas'), { width: 1280, height: 720 }), cx = cv.getContext('2d');
+      const grad = cx.createLinearGradient(0, 0, 1280, 720); grad.addColorStop(0, '#c88'); grad.addColorStop(1, '#337'); cx.fillStyle = grad; cx.fillRect(0, 0, 1280, 720);
+      const bmp = await createImageBitmap(cv);
       frame.upload(bmp, 1280, 720);
       const crops = Array.from({ length: batch }, (_, b) => { const e = [500 + 60 * b, 300], m = [505 + 60 * b, 420]; return [cropParams(EXP, 1280, 720, e, m), cropParams(AGE, 1280, 720, e, m)]; });
       run = () => live.runFrame(frame.view, crops);

@@ -6,22 +6,23 @@
 import { requestDevice, createProgram } from '../gpu/engine.js';
 import { FrameTexture } from '../gpu/frame.js';
 import { FaceFinder, OUT_FLOATS } from '../gpu/facefinder.js';
+import { UP, NETS, requireUpstream } from './upstream.js';
 const el = document.getElementById('log'), log = t => { el.textContent += t + '\n'; console.log(t); };
 const q = new URLSearchParams(location.search), faces = +(q.get('faces') || 1), frames = +(q.get('frames') || 200);
-const BASE = '/upstream/tools/tiktok-face/';
 const WANT = { expnet: ['predict_attractive', 'prob_exp', 'predict_valence', 'predict_arousal'], agenet: ['predict_age', 'prob_gender'] };
-const load = async n => { const [spec, buf] = await Promise.all([fetch(BASE + n + '.json').then(r => r.json()), fetch(BASE + n + '.bin').then(r => r.arrayBuffer())]); return { spec, buf, wanted: WANT[n] }; };
+const load = async n => { const [spec, buf] = await Promise.all([fetch(NETS + n + '.json').then(r => r.json()), fetch(NETS + n + '.bin').then(r => r.arrayBuffer())]); return { spec, buf, wanted: WANT[n] }; };
 const median = a => [...a].sort((x, y) => x - y)[a.length >> 1];
 try {
   const { device, info } = await requestDevice();
-  const tuned = q.get('tuned') === '0' ? null : await fetch(`../tuned/${info.architecture}.json`).then(r => r.ok ? r.json() : null).catch(() => null);
+  const tuned = q.get('tuned') === '0' ? null : await fetch(q.get('tunedfile') || `../tuned/${info.architecture}.json`).then(r => r.ok ? r.json() : null).catch(() => null);
   const opt = JSON.parse(q.get('opt') || '{}');
   const build = async profile => {
     const ff = await FaceFinder.create(device, { base: '../models/', tuned, opt, profile });
     const tt = await createProgram(device, await Promise.all([load('expnet'), load('agenet')]), { maxBatch: 4, source: 'texture', tuned, profile, batchBuffer: ff.ttBatch, cropsBuffer: ff.ttCrops, label: 'tiktok' });
     return { ff, tt };
   };
-  const img = new Image(); img.src = BASE + 'sample.jpg'; await img.decode();
+  if (!await requireUpstream(log)) throw new Error('needs the sample photo');
+  const img = new Image(); img.src = UP + 'sample.jpg'; await img.decode();
   const cv = Object.assign(document.createElement('canvas'), { width: 1280, height: 720 }), x = cv.getContext('2d');
   x.fillStyle = '#3a3f4a'; x.fillRect(0, 0, 1280, 720);
   for (let i = 0; i < faces; i++) { const S = faces > 1 ? 300 : 600; x.drawImage(img, 160 + i * 1000 / faces, faces > 1 ? 200 : 60, S, S); }

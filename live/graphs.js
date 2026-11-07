@@ -22,8 +22,10 @@ function makeChart(root, { title, unit, min, max, ticks, fmt, tick = fmt, stacke
     });
   }
   const plot = box.querySelector('.plot');
-  plot.addEventListener('pointermove', e => { const r = c.canvas.getBoundingClientRect(); c.hover = (e.clientX - r.left) / r.width; });
-  plot.addEventListener('pointerleave', () => { c.hover = null; c.tip.hidden = true; });
+  const at = e => { const r = c.canvas.getBoundingClientRect(); c.hover = (e.clientX - r.left) / r.width; };
+  plot.addEventListener('pointermove', at);
+  plot.addEventListener('pointerdown', at); // touch: tap or drag along the chart to read values
+  for (const ev of ['pointerleave', 'pointercancel']) plot.addEventListener(ev, () => { c.hover = null; c.tip.hidden = true; });
   return c;
 }
 
