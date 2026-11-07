@@ -38,7 +38,11 @@ select { font: inherit; color: var(--fg); background: var(--card); border: 1px s
 .foot a { color: inherit; }
 
 @media (max-width: 640px) {
-  main { padding: 12px 12px 32px; }
+  /* Portrait phones: cap the video so the graphs sit right below it, above the controls. */
+  main { padding: 12px 12px 32px; display: flex; flex-direction: column; }
+  main > header { order: 0; } .stage { order: 1; } .graphs { order: 2; } .controls { order: 3; } .hud { order: 4; } .diag { order: 5; } .foot { order: 6; }
+  .stage { max-height: 55svh; }
+  .stage canvas { object-fit: contain; }
   h1 { font-size: 19px; }
   .hud { grid-template-columns: repeat(2, 1fr); }
   .hud dd { font-size: 16px; }
@@ -78,7 +82,15 @@ select { font: inherit; color: var(--fg); background: var(--card); border: 1px s
 .legend { list-style: none; display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 8px 0 0; padding: 0; font-size: 12px; color: var(--text-secondary); }
 .legend li { display: inline-flex; align-items: center; gap: 6px; }
 .legend b { color: var(--text-primary); font: 600 12px var(--mono); font-variant-numeric: tabular-nums; min-width: 3.5ch; }
-@media (max-width: 640px) { .graphs { grid-template-columns: 1fr; } }
+@media (max-width: 640px) {
+  .graphs { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin-top: 8px; }
+  .graphs .chart { padding: 6px 8px 4px; border-radius: 10px; }
+  .chart canvas { height: 64px; }
+  .chart.wide canvas { height: 84px; }
+  .chart figcaption { font-size: 12px; }
+  .chart figcaption .v { font-size: 14px; }
+  .legend { gap: 2px 10px; font-size: 11px; margin-top: 6px; }
+}
 
 .diag { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; font-size: 13px; color: var(--muted); }
 .diag button.ghost { color: var(--fg); border-color: var(--line); padding: 6px 14px; }

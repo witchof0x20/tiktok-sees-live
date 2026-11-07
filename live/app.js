@@ -292,8 +292,14 @@ async function openCamera() {
   const [w, h] = $('res').value.split('x').map(Number);
   clearInterval(demoTimer);
   const src = $('src').value, base = { width: { ideal: w }, height: { ideal: h }, frameRate: { ideal: 60 } };
-  stream = src === 'demo' ? await demoStream(w, h)
-    : await navigator.mediaDevices.getUserMedia({ audio: false, video: src.startsWith('dev:') ? { ...base, deviceId: { exact: src.slice(4) } } : { ...base, facingMode: 'user' } });
+  const gum = video => navigator.mediaDevices.getUserMedia({ audio: false, video });
+  const id = src.startsWith('dev:') ? src.slice(4) : '';
+  if (src === 'demo') stream = await demoStream(w, h);
+  else if (id) {
+    // A remembered camera can disappear (or have a new id after permission); fall back to the default camera.
+    try { stream = await gum({ ...base, deviceId: { exact: id } }); }
+    catch (err) { if (err.name !== 'OverconstrainedError' && err.name !== 'NotFoundError') throw err; stream = await gum({ ...base, facingMode: 'user' }); }
+  } else stream = await gum({ ...base, facingMode: 'user' });
   faces = []; scored = [];
   finder?.reset();
   const track = stream.getVideoTracks()[0];
@@ -553,7 +559,7 @@ async function listSources() {
   try { cameras = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput'); } catch { cameras = []; }
   const sel = $('src'), keep = sel.value, active = stream?.getVideoTracks()[0]?.getSettings().deviceId;
   sel.textContent = '';
-  cameras.forEach((d, i) => sel.append(new Option(d.label || `Camera ${i + 1}`, `dev:${d.deviceId}`)));
+  cameras.forEach((d, i) => sel.append(new Option(d.label || `Camera ${i + 1}`, d.deviceId ? `dev:${d.deviceId}` : 'default')));
   if (demoAvailable) sel.append(new Option('Demo (sample photo)', 'demo'));
   sel.value = keep && [...sel.options].some(o => o.value === keep) ? keep : active ? `dev:${active}` : sel.options[0]?.value ?? '';
   $('srcLabel').hidden = sel.options.length < 2;

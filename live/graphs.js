@@ -62,7 +62,7 @@ export class Graphs {
     const g = cv.getContext('2d');
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     g.clearRect(0, 0, W, H);
-    const L = 40, R = 6, T = 7, B = 18, pw = W - L - R, ph = H - T - B;
+    const L = W < 180 ? 30 : 40, R = 6, T = 7, B = 18, pw = W - L - R, ph = H - T - B;
     const X = t => L + pw * (1 - (now - t) / WINDOW), Y = v => T + ph * (1 - (v - c.min) / (c.max - c.min));
     const ink2 = css(this.root, '--text-secondary'), ink3 = css(this.root, '--text-muted'), grid = css(this.root, '--grid'), surface = css(this.root, '--surface-1');
 

@@ -31,6 +31,7 @@ jobs:
         run: |
           mkdir _site
           cp -r index.html .nojekyll live _site/
+          python3 tools/stamp.py _site "${GITHUB_SHA::12}"
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

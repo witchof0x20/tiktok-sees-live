@@ -17,6 +17,12 @@ const send = (method, params = {}, sessionId) => new Promise(r => { const i = ++
 const { result: { targetId } } = await send('Target.createTarget', { url: 'about:blank' });
 const { result: { sessionId } } = await send('Target.attachToTarget', { targetId, flatten: true });
 await send('Runtime.enable', {}, sessionId);
+// VIEWPORT=WxHxDPR emulates a phone-sized, touch, mobile viewport.
+if (process.env.VIEWPORT) {
+  const [width, height, dpr] = process.env.VIEWPORT.split('x').map(Number);
+  await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: dpr || 1, mobile: true }, sessionId);
+  await send('Emulation.setTouchEmulationEnabled', { enabled: true }, sessionId);
+}
 await send('Page.navigate', { url }, sessionId);
 const t0 = Date.now(); let out;
 while (Date.now() - t0 < +timeout) {
@@ -26,6 +32,11 @@ while (Date.now() - t0 < +timeout) {
   await new Promise(r => setTimeout(r, 500));
 }
 console.log(typeof out === 'string' ? out : JSON.stringify(out, null, 1));
+// SCREENSHOT=path.png saves the viewport after the expression resolves.
+if (process.env.SCREENSHOT) {
+  const { result } = await send('Page.captureScreenshot', { format: 'png' }, sessionId);
+  fs.writeFileSync(process.env.SCREENSHOT, Buffer.from(result.data, 'base64'));
+}
 chrome.kill();
 await new Promise(r => chrome.once('exit', r));
 fs.rmSync(prof, { recursive: true, force: true, maxRetries: 5 });
