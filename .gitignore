@@ -4,3 +4,4 @@ node_modules/
 /upstream/
 # Extracted from live/vendor/face_landmarker.task by tools/convert steps; regenerate locally.
 /live/models/src/
+/wasm/target/

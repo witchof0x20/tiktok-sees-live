@@ -1,0 +1,15 @@
+[package]
+name = "tiktok_cpu"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
