@@ -74,7 +74,8 @@ export async function createEngine(device, specs, { maxBatch = 4, source = 'tens
   for (let l = 0; l < levels; l++) {
     const kernels = [];
     groups.forEach((gs, ni) => gs.filter(g => g.level === l).forEach(group => kernels.push({ group, net: ni, wBase: wBase[ni] })));
-    if (kernels.length) stages.push({ level: l, kernels, ...moduleSource(kernels, ctx) });
+    if (o.hfuse === false) for (const k of kernels) stages.push({ level: l, kernels: [k], ...moduleSource([k], ctx) });
+    else if (kernels.length) stages.push({ level: l, kernels, ...moduleSource(kernels, ctx) });
   }
 
   const entries = [

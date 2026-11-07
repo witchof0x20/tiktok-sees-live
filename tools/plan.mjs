@@ -11,7 +11,7 @@ for (const name of ['expnet', 'agenet']) {
   for (const g of groups) {
     const p = g.plan; tot += p.work; totBase += p.base;
     levels.set(g.level, (levels.get(g.level) || 0) + 1);
-    console.log(` L${String(g.level).padStart(2)} ${String(g.members.size).padStart(2)} ops T=${String(p.T).padStart(2)} S=${String(p.S).padStart(2)} wg=${String(p.nwg).padStart(4)} smem=${String(p.bytes).padStart(5)} redo=${(p.work / p.base).toFixed(2)} shared=[${p.stages.map(n => n.op).join(',')}] -> ${g.F.name}${g.F.toGap ? ' (gap)' : ''}`);
+    console.log(` L${String(g.level).padStart(2)} ${String(g.members.size).padStart(2)} ops T=${String(p.T).padStart(2)} S=${String(p.S).padStart(2)} wg=${String(p.nwg).padStart(4)} smem=${String(p.bytes).padStart(5)} redo=${(p.work / p.base).toFixed(2)} P${p.P}Q${p.Q} shared=[${p.stages.map(s => `${s.n.op}:${s.P}x${s.Q}`).join(',')}] -> ${g.F.name}${g.F.toGap ? ' (gap)' : ''}`);
   }
 }
 console.log('total work ratio', (tot / totBase).toFixed(2), 'dispatches with horizontal fusion', levels.size);

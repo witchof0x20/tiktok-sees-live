@@ -12,6 +12,9 @@ export const DEFAULTS = {
   maxRecompute: 2.5,  // reject fusions that redo more than this much of the unfused work
   tiles: [1, 2, 4, 7, 8, 14, 16, 28, 32],
   splits: [1, 2, 4, 8, 16],
+  blocks: [[1, 1], [2, 1], [4, 1], [1, 2], [2, 2], [4, 2], [1, 4], [2, 4]],
+  load: 4,            // relative cost of a vec4 load
+  mad: 4,             // relative cost of a vec4 integer multiply-add
 };
 
 const ceil = (a, b) => Math.ceil(a / b);
@@ -57,80 +60,102 @@ function regions(order, F, T) {
   return R;
 }
 
-export function evalCosts(members, mode, ext) {
-  const memo = new Map();
-  const read = n => !members.has(n) ? (ext?.(n) ?? 1) : mode.get(n) === 'shared' ? 1 : cost(n);
-  const cost = n => {
-    if (memo.has(n)) return memo.get(n);
+// Per-thread cost (rough instruction count) of producing one block of Q channel groups x P pixels.
+export function blockCost(members, mode, opt) {
+  const { load: LD, mad: MAD } = opt;
+  const memoE = new Map(), memoB = new Map();
+  const isRead = n => !members.has(n) || mode.get(n) === 'shared';
+  const elem = n => {
+    if (isRead(n)) return LD;
+    if (memoE.has(n)) return memoE.get(n);
     let c;
-    if (n.op === 'conv') c = n.k[0] * n.k[1] * n.ins[0].CG * (4 + read(n.ins[0])) + 4;
-    else if (n.op === 'dw') c = n.k[0] * n.k[1] * (1 + read(n.ins[0])) + 4;
-    else if (n.op === 'add') c = read(n.ins[0]) + read(n.ins[1]) + 3;
-    else if (n.op === 'concat') c = Math.max(...n.ins.map(read)) + 2;
-    memo.set(n, c);
+    if (n.op === 'add') c = elem(n.ins[0]) + elem(n.ins[1]) + 3;
+    else if (n.op === 'concat') c = Math.max(...n.ins.map(elem)) + 2;
+    else c = blk(n, 1, 1);
+    memoE.set(n, c);
     return c;
   };
-  return cost;
+  const blk = (n, P, Q) => {
+    const key = `${n.idx}_${P}_${Q}`;
+    if (memoB.has(key)) return memoB.get(key);
+    let c;
+    if (isRead(n)) c = P * Q * LD;
+    else if (n.op === 'add') c = blk(n.ins[0], P, Q) + blk(n.ins[1], P, Q) + 3 * P * Q;
+    else if (n.op === 'concat') c = Math.max(...n.ins.map(x => blk(x, P, Q))) + 2 * P * Q;
+    else if (n.op === 'conv') c = n.k[0] * n.k[1] * n.ins[0].CG * (P * elem(n.ins[0]) + 4 * Q * LD + 4 * P * Q * MAD) + 4 * P * Q;
+    else if (n.op === 'dw') c = n.k[0] * Q * (((P - 1) * n.s + n.k[1]) * elem(n.ins[0]) + n.k[1] * (LD + P * MAD)) + 4 * P * Q;
+    memoB.set(key, c);
+    return c;
+  };
+  return blk;
 }
+
+export const usefulMacs = n => n.op === 'conv' ? n.C * n.H * n.W * n.k[0] * n.k[1] * n.ins[0].C : n.op === 'dw' ? n.C * n.H * n.W * n.k[0] * n.k[1] : 0;
 
 // Baseline: every op its own kernel, every tensor in global memory.
-function soloWork(n) {
-  const units = n.CG * n.H * n.W;
-  if (n.op === 'conv') return units * (n.k[0] * n.k[1] * n.ins[0].CG * 5 + 4);
-  if (n.op === 'dw') return units * (n.k[0] * n.k[1] * 2 + 4);
-  return units * 4;
+function soloWork(n, opt) {
+  const m = new Set([n]);
+  return n.CG * n.H * n.W * blockCost(m, modes(m, n), opt)(n, 1, 1);
 }
 
-export function planGroup(members, F, opt, extCost) {
+const divides = (q, n) => n % q === 0;
+
+export function planGroup(members, F, opt) {
   const order = [...members].sort((a, b) => a.idx - b.idx);
   const mode = modes(members, F);
-  const cost = evalCosts(members, mode, extCost);
+  const cost = blockCost(members, mode, opt);
   const shared = order.filter(n => mode.get(n) === 'shared');
-  const base = order.reduce((a, n) => a + soloWork(n), 0);
+  // Channel blocking along the output path must not straddle a concat part.
+  const path = order.filter(n => mode.get(n) !== 'shared');
+  const qOk = q => path.every(n => divides(q, n.CG) && (n.op !== 'concat' || n.ins.every(x => divides(q, x.CG))));
+  const base = order.reduce((a, n) => a + soloWork(n, opt), 0);
   let best = null;
   for (const T of new Set([...opt.tiles.filter(t => t < F.H), F.H])) {
-    if (T > F.H) continue;
     const R = regions(order, F, T);
     if (!R) return null;
     let bytes = F.toGap ? F.C * 4 : 0;
-    const stages = [];
-    for (const n of shared) {
-      const r = R.get(n), lh = r.y1 - r.y0, lw = r.x1 - r.x0;
-      bytes += n.CG * lh * lw * 16;
-      stages.push({ n, r, units: n.CG * lh * lw });
-    }
+    for (const n of shared) { const r = R.get(n); bytes += n.CG * (r.y1 - r.y0) * (r.x1 - r.x0) * 16; }
     if (bytes > opt.sharedBytes) continue;
     const tiles = ceil(F.H, T) * ceil(F.W, T);
     for (const S of opt.splits) {
-      if (F.CG % S) continue;
-      const fUnits = (F.CG / S) * T * T;
-      let wgTime = 0, work = 0;
-      for (const s of stages) { wgTime += ceil(s.units, opt.wg) * cost(s.n) + opt.barrierCost; work += s.units * cost(s.n); }
-      wgTime += ceil(fUnits, opt.wg) * cost(F);
-      work += fUnits * cost(F);
-      const nwg = tiles * S, total = work * nwg;
-      if (total > base * opt.maxRecompute) continue;
-      const time = ceil(nwg, Math.max(1, Math.floor(opt.concThreads / opt.wg))) * wgTime;
-      if (!best || time < best.time) best = { T, S, tiles, nwg, time, work: total, base, bytes, R, stages: stages.map(s => s.n), mode, order };
+      if (!divides(S, F.CG)) continue;
+      const cgPer = F.CG / S;
+      for (const [P, Q] of opt.blocks) {
+        if (!divides(Q, cgPer) || !qOk(Q) || P > T) continue;
+        let wgTime = 0, work = 0;
+        const stages = shared.map(n => {
+          const r = R.get(n), lh = r.y1 - r.y0, lw = r.x1 - r.x0;
+          const sq = [Q, 2, 1].find(q => q <= Q && divides(q, n.CG)), sp = Math.min(P, lw);
+          const units = (n.CG / sq) * lh * ceil(lw, sp), c = cost(n, sp, sq);
+          wgTime += ceil(units, opt.wg) * c + opt.barrierCost; work += units * c;
+          return { n, P: sp, Q: sq };
+        });
+        const fUnits = (cgPer / Q) * T * ceil(T, P), fc = cost(F, P, Q);
+        wgTime += ceil(fUnits, opt.wg) * fc; work += fUnits * fc;
+        const nwg = tiles * S, total = work * nwg;
+        if (total > base * opt.maxRecompute) continue;
+        const time = ceil(nwg, Math.max(1, Math.floor(opt.concThreads / opt.wg))) * wgTime;
+        if (!best || time < best.time) best = { T, S, P, Q, tiles, nwg, time, work: total, base, macs: order.reduce((a, n) => a + usefulMacs(n), 0), bytes, R, stages, mode, order };
+      }
     }
   }
   return best;
 }
 
-export function planNet(net, opt = DEFAULTS, extCost) {
+export function planNet(net, opt = DEFAULTS) {
   // Start with one kernel per op; the input tensor is never a member.
   const groupOf = new Map();
   const groups = new Set();
   for (const n of net.order) {
     if (n.op === 'data') continue;
     const g = { members: new Set([n]), F: n };
-    g.plan = planGroup(g.members, n, opt, extCost);
+    g.plan = planGroup(g.members, n, opt);
     if (!g.plan) throw new Error(`no feasible plan for ${n.name}`);
     groups.add(g); groupOf.set(n, g);
   }
   const score = g => g.plan.time + opt.dispatchCost;
   // Greedily pull producers into their consumer's kernel while the cost model says it pays.
-  for (let changed = true; changed;) {
+  for (let changed = opt.fuse !== false; changed;) {
     changed = false;
     const list = [...groups].sort((a, b) => b.F.idx - a.F.idx);
     for (const g of list) {
@@ -142,7 +167,7 @@ export function planNet(net, opt = DEFAULTS, extCost) {
         if (!p.F.cons.every(c => g.members.has(c))) continue;
         if (p.F.toGap) continue;
         const members = new Set([...g.members, ...p.members]);
-        const plan = planGroup(members, g.F, opt, extCost);
+        const plan = planGroup(members, g.F, opt);
         if (!plan) continue;
         const gain = score(g) + score(p) - (plan.time + opt.dispatchCost);
         if (gain > 0 && (!pick || gain > pick.gain)) pick = { p, members, plan, gain };
