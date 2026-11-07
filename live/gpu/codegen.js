@@ -85,6 +85,30 @@ function kernelSource(k, j, ctx) {
         L.push(i === n.ins.length - 1 ? `  ${body}` : `  if (cg0 < ${c0 + X.CG}) { ${body} }`);
         c0 += X.CG;
       });
+    } else if (n.op === 'conv' && n.u24) {
+      // Unsigned-offset operands keep every multiply within 24 bits; all sums wrap mod 2^32 and the true
+      // accumulator (|acc| < 2^30) comes back exactly after removing 2048 * sum(x').
+      const X = n.ins[0], ex = elem(X), [kh, kw] = n.k, cog = n.CG, icg = X.CG, M16 = 'vec4<u32>(0xffffu)', M12 = 'vec4<u32>(0xfffu)';
+      L.push(...range(BQ).map(q => `  let bias${q} = bitcast<vec4<u32>>(wts[${wB + n.bOff} + cg0 + ${q}]);`));
+      L.push(...range(N).map(t => `  var a${t} = bias${(t / BP) | 0};`));
+      L.push(...range(BP).map(i => `  var s${i} = 0u;`));
+      L.push(`  for (var ky = 0; ky < ${kh}; ky++) {
+  let iy = y * ${n.s} - ${n.p} + ky;
+  for (var kx = 0; kx < ${kw}; kx++) {
+  let ix = x0 * ${n.s} - ${n.p} + kx;
+  for (var ig = 0; ig < ${icg}; ig++) {
+    let wb = ${wB + n.wOff} + (ky * ${kw} + kx) * ${4 * icg * cog} + ig * ${4 * cog} + cg0;`);
+      for (const i of range(BP)) {
+        L.push(`    let v${i} = bitcast<vec4<u32>>(${ex}(ig, iy, ix + ${i * n.s}) + vec4<i32>(32768)) & ${M16};`);
+        L.push(`    s${i} += v${i}.x + v${i}.y + v${i}.z + v${i}.w;`);
+      }
+      for (const q of range(BQ)) {
+        L.push(`    { let w0 = bitcast<vec4<u32>>(wts[wb + ${q}]) & ${M12}; let w1 = bitcast<vec4<u32>>(wts[wb + ${cog + q}]) & ${M12}; let w2 = bitcast<vec4<u32>>(wts[wb + ${2 * cog + q}]) & ${M12}; let w3 = bitcast<vec4<u32>>(wts[wb + ${3 * cog + q}]) & ${M12};`);
+        L.push(...range(BP).map(i => `      a${at(q, i)} += v${i}.x * w0 + v${i}.y * w1 + v${i}.z * w2 + v${i}.w * w3;`));
+        L.push('    }');
+      }
+      L.push('  }\n  }\n  }');
+      L.push(`  return ${ret}(${range(N).map(t => post(n, `bitcast<vec4<i32>>(a${t} - vec4<u32>(s${t % BP} * 2048u))`)).join(', ')});`);
     } else if (n.op === 'conv') {
       const X = n.ins[0], ex = elem(X), [kh, kw] = n.k, cog = n.CG, icg = X.CG;
       L.push(...range(BQ).map(q => `  let bias${q} = wts[${wB + n.bOff} + cg0 + ${q}];`));
@@ -135,11 +159,15 @@ function kernelSource(k, j, ctx) {
   b = z / ${S}; let split = z % ${S};
   ty0 = (t / ${tx}) * ${T}; tx0 = (t % ${tx}) * ${T};`];
   if (F.toGap) lines.push(`  for (var i = lid; i < ${cgPer * 4}; i += ${wg}) { atomicStore(&gs[i], 0); }`);
+  const px = plan.sched === 'px';
   plan.stages.forEach((s, si) => {
     const n = s.n, r = R.get(n), lh = r.y1 - r.y0, lw = r.x1 - r.x0, xb = Math.ceil(lw / s.P), N = (n.CG / s.Q) * lh * xb;
-    lines.push(`  for (var u = lid; u < ${N}; u += ${wg}) {
-    let xi = u % ${xb}; let q = u / ${xb}; let yy = q % ${lh}; let cg0 = (q / ${lh}) * ${s.Q};
-    let ay = ty0 * ${r.scale} + ${r.y0} + yy; let ax = tx0 * ${r.scale} + ${r.x0} + xi * ${s.P};
+    lines.push(px ? `  for (var cb = 0; cb < ${n.CG / s.Q}; cb++) {
+  for (var u = lid; u < ${lh * xb}; u += ${wg}) {
+    let xi = u % ${xb}; let yy = u / ${xb}; let cg0 = cb * ${s.Q};` : `  {
+  for (var u = lid; u < ${N}; u += ${wg}) {
+    let xi = u % ${xb}; let q = u / ${xb}; let yy = q % ${lh}; let cg0 = (q / ${lh}) * ${s.Q};`);
+    lines.push(`    let ay = ty0 * ${r.scale} + ${r.y0} + yy; let ax = tx0 * ${r.scale} + ${r.x0} + xi * ${s.P};
     let v = ${stageFns[si]}(cg0, ay, ax);
     let inY = ay >= 0 && ay < ${n.H};`);
     for (const q of range(s.Q)) for (const i of range(s.P)) {
@@ -147,12 +175,16 @@ function kernelSource(k, j, ctx) {
       lines.push(`    if (${guard}) { sh[${k.shOff.get(n)} + ((cg0 + ${q}) * ${lh} + yy) * ${lw} + xi * ${s.P} + ${i}] = select(vec4<i32>(0), v[${q * s.P + i}], inY && ax + ${i} >= 0 && ax + ${i} < ${n.W}); }`);
     }
     lines.push(`  }
+  }
   workgroupBarrier();`);
   });
   const xbF = Math.ceil(T / P), NF = (cgPer / Q) * T * xbF;
-  lines.push(`  for (var u = lid; u < ${NF}; u += ${wg}) {
-    let xi = u % ${xbF}; let q = u / ${xbF}; let yy = q % ${T}; let cg0 = split * ${cgPer} + (q / ${T}) * ${Q};
-    let ay = ty0 + yy; let ax = tx0 + xi * ${P};
+  lines.push(px ? `  for (var cb = 0; cb < ${cgPer / Q}; cb++) {
+  for (var u = lid; u < ${T * xbF}; u += ${wg}) {
+    let xi = u % ${xbF}; let yy = u / ${xbF}; let cg0 = split * ${cgPer} + cb * ${Q};` : `  {
+  for (var u = lid; u < ${NF}; u += ${wg}) {
+    let xi = u % ${xbF}; let q = u / ${xbF}; let yy = q % ${T}; let cg0 = split * ${cgPer} + (q / ${T}) * ${Q};`);
+  lines.push(`    let ay = ty0 + yy; let ax = tx0 + xi * ${P};
     if (ay < ${F.H}) {
     let v = ${fb}(cg0, ay, ax);`);
   for (const q of range(Q)) for (const i of range(P)) {
@@ -160,7 +192,7 @@ function kernelSource(k, j, ctx) {
     if (F.toGap) lines.push(`    if (${guard}) { let o = (cg0 + ${q} - split * ${cgPer}) * 4; let w = v[${q * P + i}]; atomicAdd(&gs[o], w.x); atomicAdd(&gs[o + 1], w.y); atomicAdd(&gs[o + 2], w.z); atomicAdd(&gs[o + 3], w.w); }`);
     else lines.push(`    if (${guard}) { act[${F.aOff} + ((b * ${F.CG} + cg0 + ${q}) * ${F.H} + ay) * ${F.W} + ax + ${i}] = v[${q * P + i}]; }`);
   }
-  lines.push('    }\n  }');
+  lines.push('    }\n  }\n  }');
   if (F.toGap) lines.push(`  workgroupBarrier();
   for (var i = lid; i < ${cgPer * 4}; i += ${wg}) { atomicAdd(&sums[${F.sumOff} + b * ${F.C} + split * ${cgPer * 4} + i], atomicLoad(&gs[i])); }`);
   lines.push('}');

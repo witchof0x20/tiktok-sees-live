@@ -1,7 +1,7 @@
 // WebGPU runtime: plans and compiles both nets into one sequence of fused dispatches over a shared
 // activation arena, runs a batch of faces per submit, and finishes the tiny fc/softmax tail on the CPU.
 import { parseNet, packWeights, runTail } from './graph.js';
-import { planNet, DEFAULTS } from './fuse.js';
+import { planNet, planFromTuned, DEFAULTS } from './fuse.js';
 import { moduleSource } from './codegen.js';
 
 export async function requestDevice() {
@@ -36,17 +36,17 @@ function allocate(tensors) {
   return top;
 }
 
-export async function createEngine(device, specs, { maxBatch = 4, source = 'tensor', opt = {}, profile = false } = {}) {
+export async function createEngine(device, specs, { maxBatch = 4, source = 'tensor', opt = {}, profile = false, tuned = null } = {}) {
   const o = { ...DEFAULTS, sharedBytes: device.limits.maxComputeWorkgroupStorageSize, ...opt };
   const nets = specs.map(s => parseNet(s.spec, s.wanted));
 
   // Weights for both nets in one buffer.
-  const packed = nets.map((n, i) => packWeights(n, specs[i].buf));
+  const packed = nets.map((n, i) => packWeights(n, specs[i].buf, { u24: (tuned?.opt?.u24 ?? o.u24) !== false }));
   const wBase = [];
   let wLen = 0;
   for (const p of packed) { wBase.push(wLen); wLen += p.length / 4; }
 
-  const groups = nets.map(n => planNet(n, o));
+  const groups = nets.map(n => tuned?.nets?.[n.name] ? planFromTuned(n, tuned.nets[n.name], { ...o, ...tuned.opt, sharedBytes: o.sharedBytes }) : planNet(n, o));
   const levels = Math.max(...groups.map(g => Math.max(...g.map(x => x.level)))) + 1;
 
   // Lifetimes: a tensor lives from the dispatch that writes it to the last one that reads it.

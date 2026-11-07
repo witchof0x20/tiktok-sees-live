@@ -26,4 +26,7 @@ while (Date.now() - t0 < +timeout) {
   await new Promise(r => setTimeout(r, 500));
 }
 console.log(typeof out === 'string' ? out : JSON.stringify(out, null, 1));
-chrome.kill(); fs.rmSync(prof, { recursive: true, force: true }); process.exit(0);
+chrome.kill();
+await new Promise(r => chrome.once('exit', r));
+fs.rmSync(prof, { recursive: true, force: true, maxRetries: 5 });
+process.exit(0);

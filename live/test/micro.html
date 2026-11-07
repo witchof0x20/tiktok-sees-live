@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Kernel micro-bench</title>
+<style>body{font:14px/1.4 ui-monospace,monospace;margin:16px;background:#111;color:#ddd}pre{white-space:pre-wrap}</style>
+<script type="module">
+// 1x1 conv, Cin = Cout = 128, 16x16 pixels, NC4HW4. Each variant changes one thing about the inner loop.
+import { requestDevice } from '../gpu/engine.js';
+const el = document.getElementById('log'), log = t => { el.textContent += t + '\n'; };
+const q0 = new URLSearchParams(location.search), CI = 32, CO = 32, HW = +(q0.get('hw') || 4096), MACS = 128 * 128 * HW;
+const variants = {
+  // baseline: one output vec4 per thread, weights from a storage buffer, i32
+  base: { T: 'i32', P: 1, Q: 1 },
+  f32: { T: 'f32', P: 1, Q: 1 },
+  blockP4: { T: 'i32', P: 4, Q: 1 },
+  blockP4Q2: { T: 'i32', P: 4, Q: 2 },
+  blockP4f32: { T: 'f32', P: 4, Q: 1 },
+  unroll: { T: 'i32', P: 1, Q: 1, unroll: true },
+  u24: { T: 'u24', P: 1, Q: 1 },
+  u24P4: { T: 'u24', P: 4, Q: 1 },
+  u24P2: { T: 'u24', P: 2, Q: 1 },
+  u24P2Q2: { T: 'u24', P: 2, Q: 2 },
+  u24Q2: { T: 'u24', P: 1, Q: 2 },
+  u24unroll: { T: 'u24', P: 1, Q: 1, unroll: true },
+  u24P2unroll: { T: 'u24', P: 2, Q: 1, unroll: true },
+  base2: { T: 'i32', P: 1, Q: 1 },
+};
+function src(v) {
+  const ty = v.T === 'f32' ? 'f32' : v.T === 'u24' ? 'u32' : 'i32', V = `vec4<${ty}>`;
+  const L = [];
+  L.push(`@group(0) @binding(0) var<storage, read> wts: array<${V}>;
+@group(0) @binding(1) var<storage, read> inp: array<${V}>;
+@group(0) @binding(2) var<storage, read_write> outp: array<${V}>;
+@compute @workgroup_size(128)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let u = i32(gid.x);
+  let NB = ${HW / v.P};
+  if (u >= ${CO / v.Q} * NB) { return; }
+  let px0 = (u % NB) * ${v.P}; let cg0 = (u / NB) * ${v.Q};`);
+  for (let t = 0; t < v.P * v.Q; t++) L.push(`  var a${t} = ${V}(0);`);
+  const body = ig => {
+    const r = [];
+    for (let i = 0; i < v.P; i++) r.push(`    let v${i} = inp[${ig} * ${HW} + px0 + ${i}];`);
+    for (let q = 0; q < v.Q; q++) {
+      r.push(`    { let wb = ${ig} * ${4 * CO} + cg0 + ${q};`);
+      if (v.T === 'u24') r.push(`      let w0 = wts[wb] & ${V}(0xfffu); let w1 = wts[wb + ${CO}] & ${V}(0xfffu); let w2 = wts[wb + ${2 * CO}] & ${V}(0xfffu); let w3 = wts[wb + ${3 * CO}] & ${V}(0xfffu);`);
+      else r.push(`      let w0 = wts[wb]; let w1 = wts[wb + ${CO}]; let w2 = wts[wb + ${2 * CO}]; let w3 = wts[wb + ${3 * CO}];`);
+      for (let i = 0; i < v.P; i++) {
+        const x = v.T === 'u24' ? `(v${i} & ${V}(0xffffu))` : `v${i}`;
+        r.push(`      { let x = ${x}; a${q * v.P + i} += x.x * w0 + x.y * w1 + x.z * w2 + x.w * w3; }`);
+      }
+      r.push('    }');
+    }
+    return r.join('\n');
+  };
+  if (v.unroll) for (let ig = 0; ig < CI; ig++) L.push(`  {\n${body(ig)}\n  }`);
+  else L.push(`  for (var ig = 0; ig < ${CI}; ig++) {\n${body('ig')}\n  }`);
+  for (let q = 0; q < v.Q; q++) for (let i = 0; i < v.P; i++) L.push(`  outp[(cg0 + ${q}) * ${HW} + px0 + ${i}] = a${q * v.P + i};`);
+  L.push('}');
+  return L.join('\n');
+}
+try {
+  const { device } = await requestDevice();
+  const U = GPUBufferUsage;
+  const mk = n => device.createBuffer({ size: n * 16, usage: U.STORAGE });
+  const wts = mk(CI * 4 * CO), inp = mk(CI * HW), out = mk(CO * HW);
+  const qs = device.createQuerySet({ type: 'timestamp', count: 2 });
+  const qr = device.createBuffer({ size: 16, usage: U.QUERY_RESOLVE | U.COPY_SRC }), qm = device.createBuffer({ size: 16, usage: U.MAP_READ | U.COPY_DST });
+  const res = {};
+  // Warm the clocks up: ~1 s of back-to-back work before anything is timed.
+  {
+    const module = device.createShaderModule({ code: src(variants.base) });
+    const pl = await device.createComputePipelineAsync({ layout: 'auto', compute: { module, entryPoint: 'main' } });
+    const bg = device.createBindGroup({ layout: pl.getBindGroupLayout(0), entries: [wts, inp, out].map((buffer, binding) => ({ binding, resource: { buffer } })) });
+    const t0 = performance.now();
+    while (performance.now() - t0 < 1000) {
+      const enc = device.createCommandEncoder(); const pass = enc.beginComputePass(); pass.setPipeline(pl); pass.setBindGroup(0, bg);
+      for (let i = 0; i < 100; i++) pass.dispatchWorkgroups(64);
+      pass.end(); device.queue.submit([enc.finish()]); await device.queue.onSubmittedWorkDone();
+    }
+  }
+  for (const [name, v] of Object.entries(variants)) {
+    const module = device.createShaderModule({ code: src(v) });
+    const info = await module.getCompilationInfo();
+    if (info.messages.some(m => m.type === 'error')) { log(name + ' ERR ' + info.messages.map(m => m.message).join(';')); continue; }
+    const pl = await device.createComputePipelineAsync({ layout: 'auto', compute: { module, entryPoint: 'main' } });
+    const bg = device.createBindGroup({ layout: pl.getBindGroupLayout(0), entries: [wts, inp, out].map((buffer, binding) => ({ binding, resource: { buffer } })) });
+    const n = Math.ceil(CO / v.Q * HW / v.P / 128), reps = +(q0.get('reps') || 20), ts = [];
+    for (let r = 0; r < 5; r++) {
+      const enc = device.createCommandEncoder();
+      const pass = enc.beginComputePass({ timestampWrites: { querySet: qs, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 } });
+      pass.setPipeline(pl); pass.setBindGroup(0, bg);
+      for (let i = 0; i < reps; i++) pass.dispatchWorkgroups(n);
+      pass.end(); enc.resolveQuerySet(qs, 0, 2, qr, 0); enc.copyBufferToBuffer(qr, 0, qm, 0, 16);
+      device.queue.submit([enc.finish()]);
+      await qm.mapAsync(GPUMapMode.READ); const t = new BigInt64Array(qm.getMappedRange().slice(0)); qm.unmap();
+      ts.push(Number(t[1] - t[0]) / 1e3 / reps);
+    }
+    const us = Math.min(...ts);
+    res[name] = us;
+    log(`${name.padEnd(12)} ${us.toFixed(2).padStart(8)} us  ${(MACS / us / 1e3).toFixed(0).padStart(5)} GMAC/s  (${n} wg)`);
+  }
+  {
+    const module = device.createShaderModule({ code: `@compute @workgroup_size(128) fn main() {}` });
+    const pl = await device.createComputePipelineAsync({ layout: 'auto', compute: { module, entryPoint: 'main' } });
+    const ts = [];
+    for (let r = 0; r < 5; r++) {
+      const enc = device.createCommandEncoder();
+      const pass = enc.beginComputePass({ timestampWrites: { querySet: qs, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 } });
+      pass.setPipeline(pl); for (let i = 0; i < 200; i++) pass.dispatchWorkgroups(64);
+      pass.end(); enc.resolveQuerySet(qs, 0, 2, qr, 0); enc.copyBufferToBuffer(qr, 0, qm, 0, 16);
+      device.queue.submit([enc.finish()]);
+      await qm.mapAsync(GPUMapMode.READ); const t = new BigInt64Array(qm.getMappedRange().slice(0)); qm.unmap();
+      ts.push(Number(t[1] - t[0]) / 1e3 / 200);
+    }
+    log(`empty dispatch floor ${Math.min(...ts).toFixed(2)} us`);
+  }
+  window.__micro = res;
+} catch (e) { log(String(e.stack || e)); window.__micro = { error: String(e) }; }
+</script></head>
+<body><pre id="log"></pre></body>
+</html>

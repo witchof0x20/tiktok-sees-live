@@ -61,7 +61,9 @@ export function parseNet(spec, wanted) {
 
 // Packs weights into the NC4 layouts the kernels read: conv [tap][icPad][oc/4] vec4, dw [tap][c/4] vec4, bias [c/4] vec4.
 // Bias is pre-shifted onto the accumulator's scale exactly the way the reference engine does it.
-export function packWeights(net, buf) {
+// With u24, 1x1/kxk conv weights are stored offset (w + 2048) and the bias absorbs the offset terms, so the
+// kernels can multiply unsigned 16-bit x 12-bit operands (full-rate 24-bit multiply) and still be exact mod 2^32.
+export function packWeights(net, buf, { u24 = true } = {}) {
   const rs = (x, s) => s <= 0 ? x * Math.pow(2, -s) : Math.floor(x / Math.pow(2, s) + 0.5);
   const chunks = [];
   let off = 0; // in vec4 units
@@ -75,9 +77,11 @@ export function packWeights(net, buf) {
       for (let t = 0; t < taps; t++) for (let c = 0; c < o.o; c++) w[t * n.CG * 4 + c] = src[t * o.o + c];
     } else {
       const src = new Int16Array(buf, o.wOff, o.o * taps * o.i), icPad = X.CG * 4;
+      n.u24 = u24 && src.every(v => v >= -2048 && v <= 2047);
       w = new Int32Array(taps * icPad * n.CG * 4);
+      if (n.u24) w.fill(2048);
       for (let c = 0; c < o.o; c++) for (let t = 0; t < taps; t++) for (let i = 0; i < o.i; i++)
-        w[(t * icPad + i) * n.CG * 4 + c] = src[(c * taps + t) * o.i + i];
+        w[(t * icPad + i) * n.CG * 4 + c] = src[(c * taps + t) * o.i + i] + (n.u24 ? 2048 : 0);
     }
     const b = new Int32Array(n.CG * 4);
     if (o.bias) {
@@ -86,6 +90,16 @@ export function packWeights(net, buf) {
         const v = rs(bt[c], s);
         if (!Number.isSafeInteger(v) || Math.abs(v) >= 2 ** 31) throw new Error(`bias out of range at ${n.name}`);
         b[c] = v;
+      }
+    }
+    if (n.u24) {
+      // sum (x'-32768)(w'-2048) = sum x'w' - 2048 sum x' - 32768 sum w' + K 2^26; the kernel subtracts 2048 sum x'.
+      const K = taps * X.CG * 4, cog = n.CG * 4;
+      for (let c = 0; c < o.o; c++) {
+        let sw = 0;
+        for (let t = 0; t < taps * X.CG * 4; t++) sw += w[t * cog + c];
+        const v = b[c] - 32768 * sw + K * 2 ** 26;
+        b[c] = ((v % 2 ** 32) + 2 ** 32) % 2 ** 32 | 0;
       }
     }
     n.bOff = off; chunks.push(b); off += b.length / 4;

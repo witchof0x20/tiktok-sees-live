@@ -12,7 +12,8 @@ export const DEFAULTS = {
   maxRecompute: 2.5,  // reject fusions that redo more than this much of the unfused work
   tiles: [1, 2, 4, 7, 8, 14, 16, 28, 32],
   splits: [1, 2, 4, 8, 16],
-  blocks: [[1, 1], [2, 1], [4, 1], [1, 2], [2, 2], [4, 2], [1, 4], [2, 4]],
+  blocks: [[1, 1], [2, 1], [4, 1], [1, 2], [2, 2], [4, 2], [1, 4], [2, 4], [1, 8]],
+  scheds: ['unit', 'px'],
   load: 4,            // relative cost of a vec4 load
   mad: 4,             // relative cost of a vec4 integer multiply-add
 };
@@ -62,6 +63,11 @@ function regions(order, F, T) {
 
 // Per-thread cost (rough instruction count) of producing one block of Q channel groups x P pixels.
 export function blockCost(members, mode, opt) {
+  const f = blockCostWith(members, mode, opt, opt.load);
+  f.uniform = blockCostWith(members, mode, opt, 1);
+  return f;
+}
+function blockCostWith(members, mode, opt, WLD) {
   const { load: LD, mad: MAD } = opt;
   const memoE = new Map(), memoB = new Map();
   const isRead = n => !members.has(n) || mode.get(n) === 'shared';
@@ -82,8 +88,8 @@ export function blockCost(members, mode, opt) {
     if (isRead(n)) c = P * Q * LD;
     else if (n.op === 'add') c = blk(n.ins[0], P, Q) + blk(n.ins[1], P, Q) + 3 * P * Q;
     else if (n.op === 'concat') c = Math.max(...n.ins.map(x => blk(x, P, Q))) + 2 * P * Q;
-    else if (n.op === 'conv') c = n.k[0] * n.k[1] * n.ins[0].CG * (P * elem(n.ins[0]) + 4 * Q * LD + 4 * P * Q * MAD) + 4 * P * Q;
-    else if (n.op === 'dw') c = n.k[0] * Q * (((P - 1) * n.s + n.k[1]) * elem(n.ins[0]) + n.k[1] * (LD + P * MAD)) + 4 * P * Q;
+    else if (n.op === 'conv') c = n.k[0] * n.k[1] * n.ins[0].CG * (P * (elem(n.ins[0]) + (n.u24 ? 3 : 0)) + 4 * Q * WLD + 4 * P * Q * (n.u24 ? MAD / 3 : MAD)) + 4 * P * Q;
+    else if (n.op === 'dw') c = n.k[0] * Q * (((P - 1) * n.s + n.k[1]) * elem(n.ins[0]) + n.k[1] * (WLD + P * MAD)) + 4 * P * Q;
     memoB.set(key, c);
     return c;
   };
@@ -100,7 +106,8 @@ function soloWork(n, opt) {
 
 const divides = (q, n) => n % q === 0;
 
-export function planGroup(members, F, opt) {
+// Every feasible (tile, split, block) configuration for a group, cheapest first by the cost model.
+export function candidates(members, F, opt) {
   const order = [...members].sort((a, b) => a.idx - b.idx);
   const mode = modes(members, F);
   const cost = blockCost(members, mode, opt);
@@ -109,37 +116,73 @@ export function planGroup(members, F, opt) {
   const path = order.filter(n => mode.get(n) !== 'shared');
   const qOk = q => path.every(n => divides(q, n.CG) && (n.op !== 'concat' || n.ins.every(x => divides(q, x.CG))));
   const base = order.reduce((a, n) => a + soloWork(n, opt), 0);
-  let best = null;
+  const macs = order.reduce((a, n) => a + usefulMacs(n), 0);
+  const out = [];
   for (const T of new Set([...opt.tiles.filter(t => t < F.H), F.H])) {
+    if (opt.fixed && opt.fixed.T !== T) continue;
     const R = regions(order, F, T);
-    if (!R) return null;
+    if (!R) return [];
     let bytes = F.toGap ? F.C * 4 : 0;
     for (const n of shared) { const r = R.get(n); bytes += n.CG * (r.y1 - r.y0) * (r.x1 - r.x0) * 16; }
     if (bytes > opt.sharedBytes) continue;
     const tiles = ceil(F.H, T) * ceil(F.W, T);
     for (const S of opt.splits) {
-      if (!divides(S, F.CG)) continue;
+      if (!divides(S, F.CG) || (opt.fixed && opt.fixed.S !== S)) continue;
       const cgPer = F.CG / S;
       for (const [P, Q] of opt.blocks) {
         if (!divides(Q, cgPer) || !qOk(Q) || P > T) continue;
-        let wgTime = 0, work = 0;
-        const stages = shared.map(n => {
-          const r = R.get(n), lh = r.y1 - r.y0, lw = r.x1 - r.x0;
-          const sq = [Q, 2, 1].find(q => q <= Q && divides(q, n.CG)), sp = Math.min(P, lw);
-          const units = (n.CG / sq) * lh * ceil(lw, sp), c = cost(n, sp, sq);
-          wgTime += ceil(units, opt.wg) * c + opt.barrierCost; work += units * c;
-          return { n, P: sp, Q: sq };
-        });
-        const fUnits = (cgPer / Q) * T * ceil(T, P), fc = cost(F, P, Q);
-        wgTime += ceil(fUnits, opt.wg) * fc; work += fUnits * fc;
-        const nwg = tiles * S, total = work * nwg;
-        if (total > base * opt.maxRecompute) continue;
-        const time = ceil(nwg, Math.max(1, Math.floor(opt.concThreads / opt.wg))) * wgTime;
-        if (!best || time < best.time) best = { T, S, P, Q, tiles, nwg, time, work: total, base, macs: order.reduce((a, n) => a + usefulMacs(n), 0), bytes, R, stages, mode, order };
+        if (opt.fixed && (opt.fixed.P !== P || opt.fixed.Q !== Q)) continue;
+        for (const sched of opt.scheds) {
+          if (opt.fixed && (opt.fixed.sched ?? 'unit') !== sched) continue;
+          if (sched === 'px' && P !== 1) continue;
+          // px: channel loops are workgroup-uniform (weights become scalar loads), lanes walk pixels.
+          const wcost = sched === 'px' ? cost.uniform : cost;
+          let wgTime = 0, work = 0;
+          const stages = shared.map(n => {
+            const r = R.get(n), lh = r.y1 - r.y0, lw = r.x1 - r.x0;
+            const sq = [Q, 2, 1].find(q => q <= Q && divides(q, n.CG)), sp = Math.min(P, lw);
+            const c = wcost(n, sp, sq), lanes = lh * ceil(lw, sp), units = (n.CG / sq) * lanes;
+            wgTime += (sched === 'px' ? (n.CG / sq) * ceil(lanes, opt.wg) : ceil(units, opt.wg)) * c + opt.barrierCost; work += units * c;
+            return { n, P: sp, Q: sq };
+          });
+          const lanesF = T * ceil(T, P), fUnits = (cgPer / Q) * lanesF, fc = wcost(F, P, Q);
+          wgTime += (sched === 'px' ? (cgPer / Q) * ceil(lanesF, opt.wg) : ceil(fUnits, opt.wg)) * fc; work += fUnits * fc;
+          const nwg = tiles * S, total = work * nwg;
+          if (!opt.fixed && total > base * opt.maxRecompute) continue;
+          const time = ceil(nwg, Math.max(1, Math.floor(opt.concThreads / opt.wg))) * wgTime;
+          out.push({ T, S, P, Q, sched, tiles, nwg, time, work: total, base, macs, bytes, R, stages, mode, order });
+        }
       }
     }
   }
-  return best;
+  return out.sort((a, b) => a.time - b.time);
+}
+
+export const planGroup = (members, F, opt) => candidates(members, F, opt)[0] ?? null;
+
+// Rebuilds a plan from a tuning file: [{F, members: [names], T, S, P, Q}] per net.
+export function planFromTuned(net, tuned, opt) {
+  const list = tuned.map(t => {
+    const members = new Set(t.members.map(n => net.nodes.get(n)));
+    const F = net.nodes.get(t.F);
+    if (!F || [...members].some(m => !m)) throw new Error('tuning file does not match this net');
+    const plan = planGroup(members, F, { ...opt, fixed: t });
+    if (!plan) throw new Error(`tuned config for ${t.F} is not feasible here`);
+    return { members, F, plan };
+  });
+  return levelize(list);
+}
+
+function levelize(list) {
+  const groupOf = new Map();
+  for (const g of list) for (const m of g.members) groupOf.set(m, g);
+  list.sort((a, b) => a.F.idx - b.F.idx);
+  for (const g of list) {
+    let lv = 0;
+    for (const m of g.members) for (const x of m.ins) if (!g.members.has(x) && groupOf.has(x)) lv = Math.max(lv, groupOf.get(x).level + 1);
+    g.level = lv;
+  }
+  return list;
 }
 
 export function planNet(net, opt = DEFAULTS) {
@@ -180,12 +223,5 @@ export function planNet(net, opt = DEFAULTS) {
       }
     }
   }
-  const list = [...groups].sort((a, b) => a.F.idx - b.F.idx);
-  // Level = longest chain of kernels from the input; same-level kernels are independent.
-  for (const g of list) {
-    let lv = 0;
-    for (const m of g.members) for (const x of m.ins) if (!g.members.has(x) && groupOf.has(x)) lv = Math.max(lv, groupOf.get(x).level + 1);
-    g.level = lv;
-  }
-  return list;
+  return levelize([...groups]);
 }
