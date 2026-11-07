@@ -300,6 +300,7 @@ async function openCamera() {
   // Mirror selfie cameras, not rear ones (when the browser says which way the camera faces).
   $('mirror').checked = track.getSettings().facingMode !== 'environment';
   listSources();
+  if (src !== 'demo') listResolutions(track);
   reader?.cancel().catch(() => {});
   reader = null;
   if (typeof MediaStreamTrackProcessor === 'function' && !qp.has('video')) {
@@ -525,6 +526,25 @@ $('showGraphs').addEventListener('change', () => { if (running) $('graphs').hidd
 // ?src=demo&workers=2&res=1280x720&faces=1&autostart=1 (handy for benchmarking)
 if (qp.has('res')) $('res').value = qp.get('res');
 if (qp.has('viacanvas')) FrameTexture.viaCanvas = true; // test the Firefox upload path
+// Resolutions this camera can do: common sizes up to its capabilities, plus whatever it's running at. Browsers
+// without track capabilities (Firefox) keep the static list.
+const SIZES = [[640, 360], [640, 480], [960, 540], [1280, 720], [1600, 900], [1920, 1080], [2560, 1440], [3840, 2160]];
+function listResolutions(track) {
+  const caps = track.getCapabilities?.(), set = track.getSettings();
+  if (!caps?.width?.max || !caps?.height?.max) return;
+  const fits = ([w, h]) => w <= caps.width.max && h <= caps.height.max && w >= (caps.width.min ?? 0) && h >= (caps.height.min ?? 0);
+  const sizes = SIZES.filter(fits).map(([w, h]) => `${w}x${h}`);
+  // Portrait phones report e.g. 720x1280; requests are made landscape and the camera rotates as it likes.
+  const cur = `${Math.max(set.width, set.height)}x${Math.min(set.width, set.height)}`;
+  if (set.width && !sizes.includes(cur)) sizes.push(cur);
+  sizes.sort((a, b) => a.split('x')[0] * a.split('x')[1] - b.split('x')[0] * b.split('x')[1]);
+  const sel = $('res'), want = sel.value;
+  sel.textContent = '';
+  for (const v of sizes) sel.append(new Option(v.replace('x', '×'), v));
+  sel.value = sizes.includes(want) && want === cur ? want : cur;
+  $('resLabel').hidden = sizes.length < 2;
+}
+
 // Sources: the cameras actually present (labels show up once camera access is granted), plus the demo when the
 // original tool's sample photo is available locally. The picker only appears when there's a choice.
 let cameras = [], demoAvailable = false;
