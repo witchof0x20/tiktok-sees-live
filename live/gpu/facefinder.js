@@ -34,7 +34,7 @@ fn levelSize(lvl: i32) -> vec2<f32> {
 fn roiCrop(r: vec4<f32>, size: f32) -> Crop {
   var lvl = 0; var sc = size / r.z;
   loop { if (sc >= 0.25 || lvl >= params.levels - 1) { break; } sc *= 2.0; lvl++; }
-  let k = r.z / size, c = cos(r.w), s = sin(r.w), ls = levelSize(lvl) / params.frame;
+  let k = r.z / size; let c = cos(r.w); let s = sin(r.w); let ls = levelSize(lvl) / params.frame;
   var o: Crop;
   o.m = vec4<f32>(k * c * ls.x, k * s * ls.y, -k * s * ls.x, k * c * ls.y);
   o.t = vec2<f32>(r.x - (c - s) * r.z * 0.5, r.y - (s + c) * r.z * 0.5) * ls;
@@ -98,14 +98,9 @@ fn main(@builtin(local_invocation_index) li: u32) {
   workgroupBarrier();
   if (t != 0) { return; }
   let n = min(atomicLoad(&cnt), MAXC);
-  // Start from the tracked faces (deduplicated), then add new detections that don't overlap them.
+  // Like MediaPipe: this frame's detections win; tracked ROIs from the last frame's landmarks only add faces the
+  // detector missed.
   var out = 0;
-  for (var i = 0; i < track.count && out < params.maxFaces; i++) {
-    let r = track.rects[i];
-    var dup = false;
-    for (var j = 0; j < out; j++) { if (rectIou(rois[j], r) > params.trackIou) { dup = true; } }
-    if (!dup) { rois[out] = r; out++; }
-  }
   // Weighted NMS: repeatedly take the best remaining box, average every box overlapping it by score.
   loop {
     var best = -1; var bs = -1.0;
@@ -128,6 +123,12 @@ fn main(@builtin(local_invocation_index) li: u32) {
     var dup = false;
     for (var j = 0; j < out; j++) { if (rectIou(rois[j], rect) > params.trackIou) { dup = true; } }
     if (!dup) { rois[out] = rect; out++; }
+  }
+  for (var i = 0; i < track.count && out < params.maxFaces; i++) {
+    let r = track.rects[i];
+    var dup = false;
+    for (var j = 0; j < out; j++) { if (rectIou(rois[j], r) > params.trackIou) { dup = true; } }
+    if (!dup) { rois[out] = r; out++; }
   }
   for (var i = 0; i < out; i++) { lmCrops[i] = roiCrop(rois[i], 256.0); }
   lmBatch = vec4<i32>(out, 0, 0, 0);
@@ -213,6 +214,13 @@ fn main(@builtin(local_invocation_index) li: u32) {
 }`;
 }
 
+export async function compile(device, label, code) {
+  const module = device.createShaderModule({ code, label });
+  const errs = (await module.getCompilationInfo()).messages.filter(m => m.type === 'error');
+  if (errs.length) throw new Error(`WGSL error in ${label}: ${errs.map(m => `${m.lineNum}:${m.linePos} ${m.message}`).join('; ')}`);
+  return device.createComputePipelineAsync({ layout: 'auto', compute: { module, entryPoint: 'main' } });
+}
+
 export class FaceFinder {
   static async create(device, { base = 'models/', opt = {}, tuned = null, minDetection = 0.5, minPresence = 0.6 } = {}) {
     const ff = new FaceFinder();
@@ -220,11 +228,11 @@ export class FaceFinder {
     const [detSpec, lmSpec] = await Promise.all([loadModel(base, 'face_detector'), loadModel(base, 'face_landmarks')]);
     const U = GPUBufferUsage;
     const mk = (size, usage) => device.createBuffer({ size: Math.max(16, Math.ceil(size / 16) * 16), usage });
-    ff.lmBatch = mk(16, U.STORAGE);
+    ff.lmBatch = mk(16, U.STORAGE | U.COPY_SRC);
     ff.lmCrops = mk(MAX_FACES * 32, U.STORAGE);
     ff.ttBatch = mk(16, U.STORAGE | U.COPY_DST);
     ff.ttCrops = mk(2 * MAX_FACES * 32, U.STORAGE | U.COPY_DST);
-    ff.rois = mk(MAX_FACES * 16, U.STORAGE);
+    ff.rois = mk(MAX_FACES * 16, U.STORAGE | U.COPY_SRC);
     ff.track = mk(16 + MAX_FACES * 16, U.STORAGE | U.COPY_DST);
     ff.out = mk(OUT_FLOATS * 4, U.STORAGE | U.COPY_SRC);
     ff.params = mk(64, U.UNIFORM | U.COPY_DST);
@@ -233,8 +241,9 @@ export class FaceFinder {
       createProgram(device, [lmSpec], { maxBatch: MAX_FACES, source: 'texture', opt, tuned, batchBuffer: ff.lmBatch, cropsBuffer: ff.lmCrops, label: 'landmarks' }),
     ]);
     const d = n => ff.det.output(0, n), l = n => ff.lm.output(0, n);
-    const detPost = device.createComputePipeline({ layout: 'auto', compute: { module: device.createShaderModule({ code: detPostSource({ cls16: d('t160'), cls8: d('t163'), reg16: d('t166'), reg8: d('t169') }), label: 'detPost' }), entryPoint: 'main' } });
-    const lmPost = device.createComputePipeline({ layout: 'auto', compute: { module: device.createShaderModule({ code: lmPostSource({ presence: l('t472'), pts: l('t473') }), label: 'lmPost' }), entryPoint: 'main' } });
+    const [detPost, lmPost] = await Promise.all([
+      compile(device, 'detPost', detPostSource({ cls16: d('t160'), cls8: d('t163'), reg16: d('t166'), reg8: d('t169') })),
+      compile(device, 'lmPost', lmPostSource({ presence: l('t472'), pts: l('t473') }))]);
     const bg = (p, bufs) => device.createBindGroup({ layout: p.getBindGroupLayout(0), entries: bufs.map((buffer, binding) => ({ binding, resource: { buffer } })) });
     ff.detPost = { p: detPost, bg: bg(detPost, [ff.params, ff.det.act, ff.track, ff.rois, ff.lmBatch, ff.lmCrops]) };
     ff.lmPost = { p: lmPost, bg: bg(lmPost, [ff.params, ff.lm.act, ff.rois, ff.lmBatch, ff.track, ff.ttBatch, ff.ttCrops, ff.out]) };

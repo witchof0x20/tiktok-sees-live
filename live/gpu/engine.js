@@ -105,7 +105,10 @@ export async function createProgram(device, specs, { maxBatch = 4, source = 'ten
 @compute @workgroup_size(1) fn main() {
 ${lines.join('\n')}
 }`;
-    argsPipeline = device.createComputePipeline({ layout: 'auto', compute: { module: device.createShaderModule({ code }), entryPoint: 'main' } });
+    const module = device.createShaderModule({ code, label: `${label} args` });
+    const errs = (await module.getCompilationInfo()).messages.filter(m => m.type === 'error');
+    if (errs.length) throw new Error(`WGSL error in ${label} args: ${errs.map(m => m.message).join('; ')}`);
+    argsPipeline = await device.createComputePipelineAsync({ layout: 'auto', compute: { module, entryPoint: 'main' } });
   }
 
   const t0 = performance.now();

@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Face finder check</title>
+<style>body{font:14px/1.4 ui-monospace,monospace;margin:16px;background:#111;color:#ddd}pre{white-space:pre-wrap}</style>
+<script type="module">
+// GPU face finder vs MediaPipe FaceLandmarker on the same frames: detection count, presence, landmark distance.
+import { requestDevice } from '../gpu/engine.js';
+import { FrameTexture } from '../gpu/frame.js';
+import { FaceFinder, N_LM, FACE_STRIDE, MAX_FACES } from '../gpu/facefinder.js';
+const V = '/upstream/tools/tiktok-face/vendor/';
+const el = document.getElementById('log'), log = t => { el.textContent += t + '\n'; console.log(t); };
+const q = new URLSearchParams(location.search);
+try {
+  const { device } = await requestDevice();
+  const ff = await FaceFinder.create(device, { base: '../models/' });
+  log(`detector ${ff.det.kernelCount} kernels / ${ff.det.dispatches} dispatches; landmarks ${ff.lm.kernelCount} kernels / ${ff.lm.dispatches} dispatches`);
+  const frame = new FrameTexture(device);
+  const outBytes = (4 + MAX_FACES * FACE_STRIDE) * 4;
+  const rb = device.createBuffer({ size: outBytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+  async function runOnce(c) {
+    frame.upload(c, c.width, c.height);
+    const levels = frame.tex.mipLevelCount;
+    ff.setFrame(c.width, c.height, levels);
+    const enc = device.createCommandEncoder();
+    frame.mips(enc, levels - 1);
+    ff.encode(enc, frame.view);
+    enc.copyBufferToBuffer(ff.out, 0, rb, 0, outBytes);
+    device.queue.submit([enc.finish()]);
+    await rb.mapAsync(GPUMapMode.READ);
+    const f = new Float32Array(rb.getMappedRange().slice(0)); rb.unmap();
+    return FaceFinder.decode(f);
+  }
+  const { FaceLandmarker } = await import(V + 'vision_bundle.js');
+  const mp = await FaceLandmarker.createFromOptions({ wasmLoaderPath: V + 'vision_wasm_internal.js', wasmBinaryPath: V + 'vision_wasm_internal.wasm' }, {
+    baseOptions: { modelAssetPath: V + 'face_landmarker.task', delegate: 'GPU' }, runningMode: 'IMAGE', numFaces: 4, minFaceDetectionConfidence: 0.5, minFacePresenceConfidence: 0.6 });
+  const mpv = await FaceLandmarker.createFromOptions({ wasmLoaderPath: V + 'vision_wasm_internal.js', wasmBinaryPath: V + 'vision_wasm_internal.wasm' }, {
+    baseOptions: { modelAssetPath: V + 'face_landmarker.task', delegate: 'GPU' }, runningMode: 'VIDEO', numFaces: 4, minFaceDetectionConfidence: 0.5, minFacePresenceConfidence: 0.6, minTrackingConfidence: 0.6 });
+  let vts = 0;
+  const img = new Image(); img.src = '/upstream/tools/tiktok-face/sample.jpg'; await img.decode();
+  const cases = [];
+  for (const [scale, deg, dx] of [[0.9, 0, 0], [0.5, 0, 0.2], [0.3, 0, -0.25], [0.9, 25, 0], [0.7, -40, 0.1], [1.2, 0, 0]]) cases.push({ name: `s${scale} r${deg}`, faces: [[scale, deg, dx]] });
+  cases.push({ name: 'two faces', faces: [[0.45, 0, -0.22], [0.4, 10, 0.24]] });
+  cases.push({ name: 'no face', faces: [] });
+  let worst = 0;
+  for (const c of cases) {
+    const cv = Object.assign(document.createElement('canvas'), { width: 1280, height: 720 }), x = cv.getContext('2d');
+    x.fillStyle = '#3a3f4a'; x.fillRect(0, 0, 1280, 720);
+    for (const [s, deg, dx] of c.faces) { x.save(); x.translate(640 + dx * 1280, 360); x.rotate(deg * Math.PI / 180); const S = 720 * s; x.drawImage(img, -S / 2, -S / 2, S, S); x.restore(); }
+    ff.reset();
+    const first = await runOnce(cv);
+    const tracked = await runOnce(cv); // second frame comes from tracking
+    const R = mp.detect(cv).faceLandmarks.map(L => L.map(p => [p.x * 1280, p.y * 720]));
+    // MediaPipe VIDEO mode: a blank frame drops its tracks, then two frames of this image (detect, then track).
+    const blank = Object.assign(document.createElement('canvas'), { width: 1280, height: 720 });
+    mpv.detectForVideo(blank, vts += 1000); mpv.detectForVideo(cv, vts += 33);
+    const RV = mpv.detectForVideo(cv, vts += 33).faceLandmarks.map(L => L.map(p => [p.x * 1280, p.y * 720]));
+    const line = [`${c.name.padEnd(10)} MediaPipe ${R.length} face(s) | GPU first ${first.length}, tracked ${tracked.length}`];
+    for (const [label, G, REF] of [['first vs image', first, R], ['tracked vs video', tracked, RV]]) for (const g of G) {
+      // Match each GPU face to the nearest MediaPipe face by landmark 1 (nose tip).
+      let best = null, bd = Infinity;
+      for (const r of REF) { const d = Math.hypot(r[1][0] - g.pts[2], r[1][1] - g.pts[3]); if (d < bd) { bd = d; best = r; } }
+      if (!best) { line.push(`  ${label}: presence ${g.presence.toFixed(3)}, no MediaPipe match`); continue; }
+      let sum = 0, mx = 0;
+      for (let k = 0; k < N_LM; k++) { const d = Math.hypot(best[k][0] - g.pts[2 * k], best[k][1] - g.pts[2 * k + 1]); sum += d; mx = Math.max(mx, d); }
+      const iod = Math.hypot(best[33][0] - best[263][0], best[33][1] - best[263][1]);
+      worst = Math.max(worst, sum / N_LM / iod);
+      line.push(`  ${label}: presence ${g.presence.toFixed(3)} slot ${g.slot} | landmark error mean ${(sum / N_LM).toFixed(2)} px, max ${mx.toFixed(2)} px (eye distance ${iod.toFixed(0)} px, mean ${(100 * sum / N_LM / iod).toFixed(2)}%)`);
+    }
+    log(line.join('\n'));
+  }
+  log(`worst mean landmark error: ${(worst * 100).toFixed(2)}% of the eye distance`);
+  window.__ff = { worst };
+} catch (e) { log(String(e.stack || e)); window.__ff = { error: String(e) }; }
+</script></head>
+<body><pre id="log"></pre></body>
+</html>

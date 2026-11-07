@@ -12,8 +12,8 @@ from-scratch WebGPU engine. Everything runs in the browser, on your device.
 
 ```sh
 nix develop            # node, python, chromium
-python3 -m http.server 8765 --bind 127.0.0.1
-# open http://127.0.0.1:8765/live/
+python3 tools/serve.py 8766   # static server with caching off
+# open http://127.0.0.1:8766/live/
 ```
 
 WebGPU on Linux Chrome needs `chrome://flags/#enable-unsafe-webgpu` (and Vulkan).
@@ -57,6 +57,6 @@ landmark picks and sanity filter.
 ```sh
 # stable clocks give stable timings (AMD):
 echo high | sudo tee /sys/class/drm/card1/device/power_dpm_force_performance_level
-node tools/cdp.mjs "http://127.0.0.1:8765/live/test/tune.html?k=16" "window.__tune && JSON.stringify(window.__tune)" 3000000 > live/tuned/rdna-3.json
+node tools/cdp.mjs "http://127.0.0.1:8766/live/test/tune.html?k=16" "window.__tune && JSON.stringify(window.__tune)" 3000000 > live/tuned/rdna-3.json
 echo auto | sudo tee /sys/class/drm/card1/device/power_dpm_force_performance_level
 ```
