@@ -54,7 +54,18 @@ export class FrameTexture {
         { binding: 0, resource: this.tex.createView({ baseMipLevel: l - 1, mipLevelCount: 1 }) },
         { binding: 1, resource: this.tex.createView({ baseMipLevel: l, mipLevelCount: 1 }) }] }));
     }
-    d.queue.copyExternalImageToTexture({ source }, { texture: this.tex }, [w, h]);
+    if (!FrameTexture.viaCanvas) {
+      try { d.queue.copyExternalImageToTexture({ source }, { texture: this.tex }, [w, h]); return; }
+      catch (err) {
+        // Firefox only takes bitmaps and canvases here, not <video> or VideoFrame: go through a 2D canvas from now on.
+        if (!(err instanceof TypeError)) throw err;
+        FrameTexture.viaCanvas = true;
+      }
+    }
+    const c = FrameTexture.staging ??= new OffscreenCanvas(w, h);
+    if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
+    c.getContext('2d').drawImage(source, 0, 0, w, h);
+    d.queue.copyExternalImageToTexture({ source: c }, { texture: this.tex }, [w, h]);
   }
   // Builds levels 1..upTo; only needed when a face is small enough that the crop samples a reduced level.
   mips(enc, upTo) {

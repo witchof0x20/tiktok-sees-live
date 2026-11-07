@@ -16,6 +16,11 @@ With WebGPU (current Chrome/Edge on desktop and many Android devices, Safari 26+
 **CPU version**: MediaPipe finds faces (on WebGL where available) and the TikTok nets run in a Rust/WebAssembly SIMD
 engine, still bit-exact.
 
+The app always **starts on the CPU version** (it's ready in about a second) and builds the WebGPU path in the
+background: on first use on an unknown GPU that includes a one-time quick tune, then compiling kernels. It switches
+over once that's done. If the WebGPU path fails on its first frames, it goes back to the CPU version instead of
+showing a black screen. `?backend=cpu` or `?backend=gpu` pins one path.
+
 ## What's here
 
 - `live/` – the app, and `live/gpu/`, the engine it runs on.

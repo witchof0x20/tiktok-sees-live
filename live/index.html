@@ -16,34 +16,20 @@
     <p>Runs on your device. Nothing is uploaded.</p>
   </header>
   <section class="stage" id="stage" data-state="idle">
-    <canvas id="view"></canvas>
+    <canvas id="view" hidden></canvas>
+    <canvas id="view2d"></canvas>
     <canvas id="overlay"></canvas>
     <div class="cover" id="cover">
       <button type="button" id="start">Start camera</button>
-      <button type="button" id="skipTune" class="ghost" hidden>Skip for now</button>
       <p id="status" role="status"></p>
     </div>
   </section>
   <section class="controls" aria-label="Options">
-    <label>Source <select id="src">
-      <option value="camera" selected>Front camera</option>
-      <option value="back">Back camera</option>
-      <option value="demo">Demo (sample photo)</option>
-    </select></label>
-    <label>Camera <select id="res">
+    <label id="srcLabel" hidden>Camera <select id="src"></select></label>
+    <label>Resolution <select id="res">
       <option value="640x480">640×480</option>
       <option value="1280x720" selected>1280×720</option>
       <option value="1920x1080">1920×1080</option>
-    </select></label>
-    <label>Faces <select id="faces">
-      <option selected>1</option><option>2</option><option>4</option>
-    </select></label>
-    <label>Face finder <select id="finderMode">
-      <option value="gpu" selected>GPU (ours, fused)</option>
-      <option value="mediapipe">MediaPipe workers</option>
-    </select></label>
-    <label id="workersLabel">Workers <select id="workers">
-      <option>1</option><option>2</option><option selected>3</option><option>4</option>
     </select></label>
     <label><input type="checkbox" id="mesh" checked> Landmarks</label>
     <label><input type="checkbox" id="crops" checked> Net inputs</label>
@@ -59,7 +45,6 @@
     <div><dt>Face finder, per frame</dt><dd id="msDet">–</dd></div>
     <div><dt>Nets, submit → result</dt><dd id="msNet">–</dd></div>
     <div><dt>Face finder runs on</dt><dd id="finder">–</dd></div>
-    <div><dt>Max faces</dt><dd id="maxFaces">1</dd></div>
     <div class="wide"><dt>Engine</dt><dd id="engine">–</dd></div>
   </section>
   <section class="diag" aria-label="Diagnostics">

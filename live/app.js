@@ -1,15 +1,15 @@
-// Live loop. Frames come straight off the track (MediaStreamTrackProcessor), not through <video>.
+// Live loop. Frames come straight off the track (MediaStreamTrackProcessor where available, else a <video>).
 //
-// GPU mode (default), one submit and one readback per frame:
-//   VideoFrame ─► texture ─► mips ─► face detector ─► NMS/ROIs ─► landmarks (indirect, per face) ─► crop params
-//              ─► TikTok nets (indirect, per face) ─► readback;  the same texture feeds the WebGPU preview.
-// MediaPipe mode (for comparison): MediaPipe FaceLandmarker in workers round-robin; each result is scored against the
-// exact frame it came from (a pinned ring slot).
-import { requestDevice, createEngine, createProgram, expScores, ageScores } from './gpu/engine.js';
+// WebGPU, one submit and one readback per frame:
+//   VideoFrame ─► texture ─► mips ─► face detector ─► NMS/ROIs ─► landmarks (indirect) ─► crop params
+//              ─► TikTok nets (indirect) ─► readback;  the same texture feeds the WebGPU preview.
+// CPU version (no WebGPU): MediaPipe FaceLandmarker in a worker finds the face, the original tool's canvas crop feeds
+// the TikTok nets running in two WebAssembly workers, and a 2D canvas shows the preview.
+import { requestDevice, createProgram, expScores, ageScores } from './gpu/engine.js';
 import { runTail } from './gpu/graph.js';
 import { FaceFinder, OUT_FLOATS, MODELS as FACE_MODELS, loadModel } from './gpu/facefinder.js';
 import { tune } from './gpu/tune.js';
-import { FrameTexture, EXP, AGE, cropParams, transform } from './gpu/frame.js';
+import { FrameTexture, EXP, AGE, transform } from './gpu/frame.js';
 import { Display } from './gpu/display.js';
 import { Graphs } from './graphs.js';
 
@@ -18,7 +18,7 @@ const NETS = 'nets/';
 // The demo source uses the original tool's sample photo, which isn't redistributed (tools/fetch-upstream.sh fetches it).
 const SAMPLE = '../upstream/tools/tiktok-face/sample.jpg';
 const MOOD = ['Angry', 'Disgust', 'Fear', 'Happy', 'Sad', 'Surprise', 'Neutral'];
-const MIN_AGE = 16, MAX_FACES = 4;
+const MIN_AGE = 16, MAX_FACES = 4, FACES = 1; // capacity per submit vs faces actually tracked and scored
 const WANT = { expnet: ['predict_attractive', 'prob_exp', 'predict_valence', 'predict_arousal'], agenet: ['predict_age', 'prob_gender'] };
 
 const $ = id => document.getElementById(id);
@@ -31,10 +31,10 @@ function Rate() { this.t = []; this.tick = now => { this.t.push(now); while (thi
 function Avg() { this.v = 0; this.n = 0; this.add = x => { this.n++; this.v += (x - this.v) / Math.min(this.n, 30); }; }
 const stats = { cam: new Rate(), det: new Rate(), net: new Rate(), detMs: new Avg(), gpuMs: new Avg(), e2e: new Avg() };
 
-let device, engine, display, ring = [], workers = [], mainFinder = null, stream = null, reader = null, running = false;
+let device, display, workers = [], mainFinder = null, stream = null, reader = null, running = false;
 let finder, tiktok, gpuFrame, readRing = [], specs, tuned = null, adapterInfo;
 // CPU backend (no WebGPU): MediaPipe workers find faces, two WebAssembly workers run the nets.
-let backend = 'webgpu', ready = false, view2d = null, netWorkers = [], netsBusy = false, finderDelegate = null;
+let backend = 'cpu', ready = false, gpuSummary = '', view2d = null, netWorkers = [], netsBusy = false, finderDelegate = null;
 const cpuPending = new Map();
 let faces = [], facesId = -1, scored = [], scoredId = -1, frameId = 0, slotNext = 0, lastTs = -1;
 
@@ -63,10 +63,11 @@ function startWorker() {
       else if (data.type === 'result') { w.busy = false; onLandmarks(data); }
     };
     w.onerror = e => reject(new Error(e.message || 'worker failed'));
-    w.postMessage({ type: 'init', vendor: VENDOR, delegate: 'GPU', numFaces: MAX_FACES });
+    w.postMessage({ type: 'init', vendor: VENDOR, delegate: 'GPU', numFaces: FACES });
   });
 }
 
+// CPU version: MediaPipe workers (WebGL or CPU), or MediaPipe on the main thread if workers can't start.
 async function setWorkers(n) {
   workers.forEach(w => w.terminate());
   workers = [];
@@ -76,16 +77,13 @@ async function setWorkers(n) {
     workers.forEach(w => w.terminate()); workers = [];
     if (!mainFinder) {
       const { FaceLandmarker } = await import(VENDOR + 'vision_bundle.js');
-      mainFinder = await FaceLandmarker.createFromOptions({ wasmLoaderPath: VENDOR + 'vision_wasm_internal.js', wasmBinaryPath: VENDOR + 'vision_wasm_internal.wasm' }, {
-        baseOptions: { modelAssetPath: VENDOR + 'face_landmarker.task', delegate: 'GPU' }, runningMode: 'VIDEO', numFaces: MAX_FACES,
+      const make = delegate => FaceLandmarker.createFromOptions({ wasmLoaderPath: VENDOR + 'vision_wasm_internal.js', wasmBinaryPath: VENDOR + 'vision_wasm_internal.wasm' }, {
+        baseOptions: { modelAssetPath: VENDOR + 'face_landmarker.task', delegate }, runningMode: 'VIDEO', numFaces: FACES,
         minFaceDetectionConfidence: 0.5, minFacePresenceConfidence: 0.6, minTrackingConfidence: 0.6 });
+      try { mainFinder = await make('GPU'); finderDelegate = 'GPU'; } catch { mainFinder = await make('CPU'); finderDelegate = 'CPU'; }
     }
   }
-  if (backend === 'cpu') { $('finder').textContent = `MediaPipe (${finderDelegate === 'GPU' ? 'WebGL' : 'CPU'}), ${workers.length || 'main thread'} worker${workers.length === 1 ? '' : 's'}`; return; }
-  // Each in-flight detection pins a ring slot; two spare slots keep the GPU from reading a slot being refilled.
-  ring.forEach(f => f.tex?.destroy());
-  ring = Array.from({ length: Math.max(1, workers.length) + 4 }, () => Object.assign(new FrameTexture(device), { pins: 0 }));
-  $('finder').textContent = workers.length ? `${workers.length} worker${workers.length > 1 ? 's' : ''}` : 'main thread';
+  $('finder').textContent = `MediaPipe on ${finderDelegate === 'GPU' ? 'WebGL' : 'the CPU'}, ${workers.length ? `${workers.length} worker${workers.length > 1 ? 's' : ''}` : 'main thread'}`;
 }
 
 // Tuning: a bundled full tuning file for this GPU architecture if there is one, else a plan tuned on this device
@@ -96,24 +94,21 @@ const cacheKey = () => `tiktok-sees-live:plan:v${TUNE_VERSION}:${adapterInfo.ven
 const fetchJson = url => fetch(url).then(r => r.ok ? r.json() : null).catch(() => null);
 let planLabel = 'untuned';
 
-async function quickTune() {
+async function quickTune(note) {
   const faceSpecs = await Promise.all(Object.keys(FACE_MODELS).map(n => loadModel('models/', n)));
   const seed = await fetchJson(SEED);
-  const ac = new AbortController();
-  $('skipTune').hidden = false;
-  $('skipTune').onclick = () => ac.abort();
   try {
     const t0 = performance.now();
-    const plan = await tune(device, [...specs, ...faceSpecs], { quick: true, seed, signal: ac.signal,
-      onProgress: f => say(`Optimizing for this GPU, one time only: ${Math.round(100 * f)}%`) });
+    const plan = await tune(device, [...specs, ...faceSpecs], { quick: true, seed,
+      onProgress: f => note(`tuning for this GPU (one time) ${Math.round(100 * f)}%`) });
     plan.tuneMs = Math.round(performance.now() - t0);
     plan.tunedAt = new Date().toISOString();
     try { localStorage.setItem(cacheKey(), JSON.stringify(plan)); } catch {}
     return plan;
   } catch (err) {
-    if (!ac.signal.aborted) console.warn('quick tuning failed', err);
+    console.warn('quick tuning failed', err);
     return null;
-  } finally { $('skipTune').hidden = true; }
+  }
 }
 
 async function buildPrograms(plan) {
@@ -122,21 +117,21 @@ async function buildPrograms(plan) {
   tiktok = await createProgram(device, specs, { maxBatch: MAX_FACES, source: 'texture', tuned: plan, batchBuffer: finder.ttBatch, cropsBuffer: finder.ttCrops, label: 'tiktok' });
 }
 
-async function init() {
-  say('Starting WebGPU…');
+// Builds the WebGPU path (tuning on first use, then compiling); note(text) reports progress.
+async function initGpu(note) {
+  note('starting');
   ({ device, info: adapterInfo } = await requestDevice());
-  device.lost.then(l => say(`GPU device lost: ${l.message}`));
-  say('Loading nets…');
+  device.lost.then(l => { if (backend === 'webgpu') revertToCpu(new Error(`GPU device lost: ${l.message}`)); });
   specs = await Promise.all([loadSpec('expnet'), loadSpec('agenet')]);
   let plan = null;
   if (!qp.has('notune')) {
     if (!qp.has('nobundle')) plan = await fetchJson(`tuned/${adapterInfo.architecture || 'none'}.json`);
     if (plan) planLabel = `autotuned for ${adapterInfo.architecture}`;
     if (!plan) { try { plan = JSON.parse(localStorage.getItem(cacheKey())); } catch {} if (plan) planLabel = 'tuned on this device'; }
-    if (!plan) { plan = await quickTune(); if (plan) planLabel = 'tuned on this device'; }
+    if (!plan) { plan = await quickTune(note); if (plan) planLabel = 'tuned on this device'; }
   }
   tuned = plan;
-  say('Compiling fused kernels…');
+  note('compiling kernels');
   try { await buildPrograms(plan); }
   catch (err) {
     // A plan that doesn't fit this device (e.g. less workgroup memory): drop it and use the untuned default.
@@ -150,8 +145,37 @@ async function init() {
   readRing = Array.from({ length: 3 }, () => ({ buf: device.createBuffer({ size: Math.ceil(bytes / 16) * 16, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }), busy: false }));
   display = new Display(device, view);
   const k = finder.det.kernelCount + finder.lm.kernelCount + tiktok.kernelCount + 2, d = finder.det.dispatches + finder.lm.dispatches + tiktok.dispatches + 4;
-  $('engine').textContent = `${adapterInfo.vendor} ${adapterInfo.architecture} · face detector + landmarks + both TikTok nets: ${k} kernels, ${d} dispatches per frame, one submit · ${planLabel} · TikTok nets bit-exact int16 fixed point`;
-  await setMode();
+  gpuSummary = `WebGPU · ${adapterInfo.vendor} ${adapterInfo.architecture} · face detector + landmarks + both TikTok nets: ${k} kernels, ${d} dispatches per frame, one submit · ${planLabel} · TikTok nets bit-exact int16 fixed point`;
+}
+
+// Hand over from the CPU version to the WebGPU path once it's built. The CPU workers stay alive until the GPU path
+// has delivered a real result (probation); if it fails before that, the app goes back to the CPU version.
+let gpuProbation = false;
+function switchToGpu() {
+  backend = 'webgpu'; gpuProbation = true;
+  faces = []; scored = []; facesId = scoredId = -1;
+  finder.reset();
+  view.hidden = false; $('view2d').hidden = true;
+  $('engine').textContent = gpuSummary;
+  $('finder').textContent = 'our GPU face finder, same submit';
+}
+function gpuConfirmed() {
+  if (!gpuProbation) return;
+  gpuProbation = false;
+  for (const p of cpuPending.values()) p.bmp.close();
+  cpuPending.clear();
+  workers.forEach(w => w.terminate()); netWorkers.forEach(w => w.terminate());
+  workers = []; netWorkers = []; mainFinder?.close?.(); mainFinder = null; netsBusy = false;
+}
+function revertToCpu(err) {
+  console.error('WebGPU path failed, back to the CPU version', err);
+  if (!gpuProbation && !netWorkers.length) { say(`WebGPU failed: ${err.message || err}`); return; }
+  backend = 'cpu'; gpuProbation = false;
+  faces = []; scored = [];
+  view.hidden = true; $('view2d').hidden = false;
+  cpuSummary = cpuSummary.replace('CPU version', `CPU version (WebGPU failed: ${String(err.message || err).slice(0, 80)})`);
+  $('engine').textContent = cpuSummary;
+  if (view2d) $('finder').textContent = `MediaPipe on ${finderDelegate === 'GPU' ? 'WebGL' : 'the CPU'}`;
 }
 
 function startNetWorker(name) {
@@ -172,13 +196,14 @@ function startNetWorker(name) {
 
 async function initCpu(reason) {
   backend = 'cpu';
-  say(`${reason} Starting the CPU version…`);
-  view2d = view.getContext('2d');
-  $('finderMode').value = 'mediapipe'; $('finderMode').disabled = true; $('workersLabel').hidden = false;
-  if (!qp.has('workers')) $('workers').value = '1'; // phones: one MediaPipe instance next to the two net workers
-  [netWorkers] = await Promise.all([Promise.all(['expnet', 'agenet'].map(startNetWorker)), setWorkers(+$('workers').value)]);
-  $('engine').textContent = `CPU version (${reason.replace(/[.:]$/, '')}) · faces: MediaPipe on ${finderDelegate === 'GPU' ? 'WebGL' : 'the CPU'} · TikTok nets: Rust/WebAssembly SIMD, bit-exact int16 fixed point, one worker per net`;
+  say('Starting…');
+  view2d = $('view2d').getContext('2d');
+  // One MediaPipe instance by default (phones), next to the two net workers.
+  [netWorkers] = await Promise.all([Promise.all(['expnet', 'agenet'].map(startNetWorker)), setWorkers(+(qp.get('workers') || 1))]);
+  cpuSummary = `CPU version${reason ? ` (${reason.replace(/[.:]$/, '')})` : ''} · faces: MediaPipe on ${finderDelegate === 'GPU' ? 'WebGL' : 'the CPU'} · TikTok nets: Rust/WebAssembly SIMD, bit-exact int16 fixed point, one worker per net`;
+  $('engine').textContent = cpuSummary;
 }
+let cpuSummary = '';
 
 // The original tool's crop: similarity transform putting eye and mouth midpoints on the template; BGR - 128, HWC.
 const cropCanvases = {};
@@ -199,10 +224,18 @@ function onFrameCpu(frame, w, h, tsUs, now) {
   if ($('mirror').checked) view2d.setTransform(-1, 0, 0, 1, w, 0);
   view2d.drawImage(frame, 0, 0, w, h);
   view2d.restore();
-  const wk = workers.find(x => !x.busy);
-  if (!wk) return;
   const ts = Math.max(lastTs + 1, Math.round(tsUs / 1000)); lastTs = ts;
   const id = ++frameId;
+  if (!workers.length && mainFinder) {
+    createImageBitmap(frame).then(keep => {
+      cpuPending.set(id, { bmp: keep, w, h, t: now });
+      const t0 = performance.now(), r = mainFinder.detectForVideo(keep, ts);
+      onLandmarksCpu({ id, ms: performance.now() - t0, faces: r.faceLandmarks.map(L => Float32Array.from(L.flatMap(p => [p.x, p.y]))) });
+    });
+    return;
+  }
+  const wk = workers.find(x => !x.busy);
+  if (!wk) return;
   wk.busy = true;
   // Keep one bitmap for cropping once the landmarks come back; send a copy to the worker.
   createImageBitmap(frame).then(async keep => {
@@ -219,7 +252,7 @@ function onLandmarksCpu({ id, faces: raw, ms }) {
   const now = performance.now();
   stats.det.tick(now); stats.detMs.add(ms);
   if (id < facesId) { p.bmp.close(); return; }
-  const found = raw.map(a => faceFrom(a, p.w, p.h)).filter(believable).sort((a, b) => b.span - a.span).slice(0, +$('faces').value);
+  const found = raw.map(a => faceFrom(a, p.w, p.h)).filter(believable).sort((a, b) => b.span - a.span).slice(0, FACES);
   faces = found; facesId = id;
   if (!found.length) graphs.push(now, null);
   if (!found.length || netsBusy) { p.bmp.close(); return; }
@@ -236,15 +269,6 @@ function onLandmarksCpu({ id, faces: raw, ms }) {
     scored = found.map((f, i) => ({ ...expScores(E.out[i]), ...ageScores(A.out[i]), e: f.e, m: f.m }));
     graphs.push(t, scored[0]);
   }).catch(err => console.error(err)).finally(() => { netsBusy = false; });
-}
-
-async function setMode() {
-  const mp = $('finderMode').value === 'mediapipe';
-  $('workersLabel').hidden = !mp;
-  if (!mp) { workers.forEach(w => w.terminate()); workers = []; $('finder').textContent = 'GPU, same submit'; finder.reset(); faces = []; scored = []; return; }
-  say('Loading MediaPipe…');
-  if (!engine) engine = await createEngine(device, specs, { maxBatch: MAX_FACES, source: 'texture', tuned });
-  await setWorkers(+$('workers').value);
 }
 
 // Demo source: upstream's sample photo drifting and turning, as a 60 fps stream through the same path as a camera.
@@ -267,12 +291,15 @@ async function openCamera() {
   stream?.getTracks().forEach(t => t.stop());
   const [w, h] = $('res').value.split('x').map(Number);
   clearInterval(demoTimer);
-  const src = $('src').value;
+  const src = $('src').value, base = { width: { ideal: w }, height: { ideal: h }, frameRate: { ideal: 60 } };
   stream = src === 'demo' ? await demoStream(w, h)
-    : await navigator.mediaDevices.getUserMedia({ audio: false, video: { width: { ideal: w }, height: { ideal: h }, frameRate: { ideal: 60 }, facingMode: src === 'back' ? 'environment' : 'user' } });
+    : await navigator.mediaDevices.getUserMedia({ audio: false, video: src.startsWith('dev:') ? { ...base, deviceId: { exact: src.slice(4) } } : { ...base, facingMode: 'user' } });
   faces = []; scored = [];
   finder?.reset();
   const track = stream.getVideoTracks()[0];
+  // Mirror selfie cameras, not rear ones (when the browser says which way the camera faces).
+  $('mirror').checked = track.getSettings().facingMode !== 'environment';
+  listSources();
   reader?.cancel().catch(() => {});
   reader = null;
   if (typeof MediaStreamTrackProcessor === 'function' && !qp.has('video')) {
@@ -305,7 +332,7 @@ document.body.append(fallbackVideo);
 
 function resize(w, h) {
   if (overlay.width === w && overlay.height === h) return;
-  overlay.width = view.width = w; overlay.height = view.height = h;
+  overlay.width = view.width = $('view2d').width = w; overlay.height = view.height = $('view2d').height = h;
   stage.style.aspectRatio = `${w} / ${h}`;
 }
 
@@ -318,43 +345,21 @@ function onFrame(frame, w, h, tsUs) {
   stats.cam.tick(now);
   resize(w, h);
   if (backend === 'cpu') { onFrameCpu(frame, w, h, tsUs, now); draw(w, h, frame); return; }
-  if ($('finderMode').value === 'gpu') { onFrameGpu(frame, w, h, now); draw(w, h, frame); return; }
-  const ts = Math.max(lastTs + 1, Math.round(tsUs / 1000)); lastTs = ts;
-  const id = ++frameId;
-  // Ring slots stay pinned from capture until their nets are submitted; a frame with no free slot is dropped.
-  let slot = -1;
-  for (let k = 0; k < ring.length; k++) { const c = (slotNext + k) % ring.length; if (!ring[c].pins) { slot = c; break; } }
-  if (slot < 0) return;
-  slotNext = slot + 1;
-  ring[slot].upload(frame, w, h);
-  const enc = device.createCommandEncoder();
-  display.draw(enc, ring[slot].view, $('mirror').checked);
-  device.queue.submit([enc.finish()]);
-  if (workers.length) {
-    const wk = workers.find(x => !x.busy);
-    if (wk) {
-      wk.busy = true; ring[slot].pins++;
-      pending.set(id, { slot, w, h, t: now });
-      createImageBitmap(frame).then(bitmap => wk.postMessage({ type: 'frame', id, ts, bitmap }, [bitmap]), () => { wk.busy = false; ring[slot].pins--; pending.delete(id); });
-    }
-  } else if (mainFinder) {
-    ring[slot].pins++;
-    pending.set(id, { slot, w, h, t: now });
-    const r = mainFinder.detectForVideo(frame, ts);
-    onLandmarks({ id, ms: performance.now() - now, faces: r.faceLandmarks.map(L => Float32Array.from(L.flatMap(p => [p.x, p.y]))) });
-  }
+  try { onFrameGpu(frame, w, h, now); }
+  catch (err) { revertToCpu(err); return; }
   draw(w, h, frame);
 }
 
 // The whole pipeline for one frame in one submit; results come back in one readback.
 function onFrameGpu(frame, w, h, now) {
+  if (qp.has('gpufail')) throw new Error('simulated GPU failure (?gpufail)');
   gpuFrame.upload(frame, w, h);
   const enc = device.createCommandEncoder();
   const slot = readRing.find(r => !r.busy);
   if (slot) {
     slot.busy = true;
     const levels = gpuFrame.tex.mipLevelCount;
-    finder.setFrame(w, h, levels, +$('faces').value);
+    finder.setFrame(w, h, levels, FACES);
     gpuFrame.mips(enc, levels - 1);
     finder.encode(enc, gpuFrame.view);
     tiktok.encode(enc, { view: gpuFrame.view });
@@ -369,6 +374,7 @@ function onFrameGpu(frame, w, h, now) {
     const all = slot.buf.getMappedRange();
     const out = new Float32Array(all.slice(0, OUT_FLOATS * 4)), sums = new Int32Array(all.slice(OUT_FLOATS * 4));
     slot.buf.unmap(); slot.busy = false;
+    gpuConfirmed();
     const t = performance.now();
     stats.gpuMs.add(t - t1); stats.e2e.add(t - now); stats.det.tick(t); stats.net.tick(t);
     const found = FaceFinder.decode(out).filter(f => f.presence >= finder.minPresence).map(f => {
@@ -382,35 +388,7 @@ function onFrameGpu(frame, w, h, now) {
   }, () => { slot.busy = false; });
 }
 
-function onLandmarks(data) {
-  if (backend === 'cpu') return onLandmarksCpu(data);
-  const { id, faces: raw, ms } = data;
-  const p = pending.get(id);
-  pending.delete(id);
-  if (!p) return;
-  const fr = ring[p.slot];
-  try { score(id, p, fr, raw, ms); } finally { fr.pins--; }
-}
-
-function score(id, p, fr, raw, ms) {
-  stats.det.tick(performance.now()); stats.detMs.add(ms);
-  if (id < facesId) return; // a later frame already reported
-  const found = raw.map(a => faceFrom(a, p.w, p.h)).filter(believable).sort((a, b) => b.span - a.span).slice(0, +$('faces').value);
-  faces = found; facesId = id;
-  if (!found.length) graphs.push(performance.now(), null);
-  if (!found.length || !engine.idle()) return;
-  const crops = found.map(f => [cropParams(EXP, p.w, p.h, f.e, f.m), cropParams(AGE, p.w, p.h, f.e, f.m)]);
-  const lvl = Math.max(...crops.flat().map(c => c.lvl));
-  const sent = found.map(f => ({ e: f.e, m: f.m })), t1 = performance.now();
-  engine.runFrame(fr.view, crops, enc => fr.mips(enc, lvl))?.then(({ res }) => {
-    const t = performance.now();
-    stats.gpuMs.add(t - t1); stats.e2e.add(t - p.t); stats.net.tick(t);
-    if (id < scoredId) return;
-    scoredId = id;
-    scored = res.map((r, i) => ({ ...expScores(r[0]), ...ageScores(r[1]), e: sent[i].e, m: sent[i].m }));
-    graphs.push(t, scored[0]); // faces are sorted largest first
-  });
-}
+const onLandmarks = data => onLandmarksCpu(data);
 
 // Pair each visible face with the nearest scored face from the latest finished submit.
 function match(f) {
@@ -479,11 +457,10 @@ function hud() {
   if (!running) return;
   $('fpsCam').textContent = `${stats.cam.value().toFixed(0)} fps`;
   $('fpsDet').textContent = `${stats.det.value().toFixed(0)} fps`;
-  $('msDet').textContent = $('finderMode').value === 'gpu' ? 'in the submit' : `${stats.detMs.v.toFixed(1)} ms`;
+  $('msDet').textContent = backend === 'webgpu' ? 'in the submit' : `${stats.detMs.v.toFixed(1)} ms`;
   $('fpsNet').textContent = `${stats.net.value().toFixed(0)} fps`;
   $('msNet').textContent = `${stats.gpuMs.v.toFixed(1)} ms`;
   $('msE2e').textContent = `${stats.e2e.v.toFixed(1)} ms`;
-  $('maxFaces').textContent = $('faces').value;
   setTimeout(hud, 250);
 }
 
@@ -491,13 +468,18 @@ async function start() {
   $('start').disabled = true;
   try {
     if (!ready) {
-      const noGpu = !navigator.gpu ? 'This browser has no WebGPU.' : qp.get('backend') === 'cpu' ? 'CPU version requested.' : null;
-      if (noGpu) await initCpu(noGpu);
+      // Start right away on the CPU version; build the WebGPU path in the background and switch when it's ready.
+      // ?backend=cpu stays on the CPU version, ?backend=gpu waits for WebGPU (benchmarking).
+      const mode = qp.get('backend');
+      if (mode === 'gpu') { await initGpu(t => say(`WebGPU: ${t}…`)); switchToGpu(); }
       else {
-        try { await init(); }
-        catch (err) {
-          console.warn('WebGPU path unavailable, using the CPU version', err);
-          await initCpu(/adapter/i.test(err.message) ? 'No WebGPU adapter on this device.' : `WebGPU failed (${err.message}).`);
+        await initCpu(!navigator.gpu ? 'this browser has no WebGPU' : mode === 'cpu' ? 'requested' : '');
+        if (navigator.gpu && mode !== 'cpu') {
+          initGpu(t => { $('engine').textContent = `${cpuSummary} · WebGPU path: ${t}…`; }).then(switchToGpu, err => {
+            console.warn('WebGPU path unavailable, staying on the CPU version', err);
+            cpuSummary = cpuSummary.replace('CPU version', `CPU version (${/adapter/i.test(err.message) ? 'no WebGPU adapter' : 'WebGPU failed'})`);
+            $('engine').textContent = cpuSummary;
+          });
         }
       }
       ready = true;
@@ -525,7 +507,7 @@ function diagnostics() {
     limits: L ? { maxComputeWorkgroupStorageSize: L.maxComputeWorkgroupStorageSize, maxComputeInvocationsPerWorkgroup: L.maxComputeInvocationsPerWorkgroup, maxStorageBufferBindingSize: L.maxStorageBufferBindingSize, maxStorageBuffersPerShaderStage: L.maxStorageBuffersPerShaderStage } : null,
     backend, finderDelegate, cpuNetMs: stats.cpuNetMs ?? null, plan: backend === 'cpu' ? null : planLabel, tuneMs: tuned?.tuneMs ?? null, tuneTimer: tuned?.timer ?? null, planTotalsUs: tuned?.totalUs ?? null,
     kernels: ff ? { detector: [ff.det.kernelCount, ff.det.dispatches], landmarks: [ff.lm.kernelCount, ff.lm.dispatches], tiktok: tiktok && [tiktok.kernelCount, tiktok.dispatches], compileMs: Math.round(ff.det.compileMs + ff.lm.compileMs + (tiktok?.compileMs || 0)) } : null,
-    source: $('src').value, finderMode: $('finderMode').value, frame: [overlay.width, overlay.height], facesNow: faces.length,
+    source: currentSource(), cameras: cameras.length, frame: [overlay.width, overlay.height], facesNow: faces.length,
     frameReader: typeof MediaStreamTrackProcessor === 'function' && !qp.has('video') ? 'MediaStreamTrackProcessor' : 'video',
     hud,
   };
@@ -537,16 +519,29 @@ $('diagBtn').addEventListener('click', async () => {
   catch { $('diagMsg').textContent = 'Select the text below and copy it.'; $('diagOut').select(); }
 });
 $('start').addEventListener('click', start);
-for (const id of ['res', 'src']) $(id).addEventListener('change', () => {
-  if (id === 'src') $('mirror').checked = $('src').value !== 'back';
-  if (running) openCamera().catch(err => say(String(err)));
-});
-$('workers').addEventListener('change', () => { if ((engine || backend === 'cpu') && $('finderMode').value === 'mediapipe') setWorkers(+$('workers').value); });
-$('finderMode').addEventListener('change', () => { if (finder && backend !== 'cpu') setMode().catch(err => say(String(err))); });
+for (const id of ['res', 'src']) $(id).addEventListener('change', () => { if (running) openCamera().catch(err => say(String(err))); });
+navigator.mediaDevices?.addEventListener?.('devicechange', () => listSources());
 $('showGraphs').addEventListener('change', () => { if (running) $('graphs').hidden = !$('showGraphs').checked; });
 // ?src=demo&workers=2&res=1280x720&faces=1&autostart=1 (handy for benchmarking)
-for (const k of ['src', 'workers', 'res', 'faces', 'finderMode']) if (qp.has(k)) $(k).value = qp.get(k);
-if (qp.has('autostart') && $('src').value === 'demo') start();
-fetch(SAMPLE, { method: 'HEAD' }).then(r => { if (!r.ok) throw 0; }).catch(() => $('src').querySelector('[value=demo]').remove());
-if (!navigator.gpu) say('No WebGPU in this browser: the CPU version will run (slower).');
+if (qp.has('res')) $('res').value = qp.get('res');
+if (qp.has('viacanvas')) FrameTexture.viaCanvas = true; // test the Firefox upload path
+// Sources: the cameras actually present (labels show up once camera access is granted), plus the demo when the
+// original tool's sample photo is available locally. The picker only appears when there's a choice.
+let cameras = [], demoAvailable = false;
+const currentSource = () => $('src').value || 'default';
+async function listSources() {
+  try { cameras = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput'); } catch { cameras = []; }
+  const sel = $('src'), keep = sel.value, active = stream?.getVideoTracks()[0]?.getSettings().deviceId;
+  sel.textContent = '';
+  cameras.forEach((d, i) => sel.append(new Option(d.label || `Camera ${i + 1}`, `dev:${d.deviceId}`)));
+  if (demoAvailable) sel.append(new Option('Demo (sample photo)', 'demo'));
+  sel.value = keep && [...sel.options].some(o => o.value === keep) ? keep : active ? `dev:${active}` : sel.options[0]?.value ?? '';
+  $('srcLabel').hidden = sel.options.length < 2;
+}
+fetch(SAMPLE, { method: 'HEAD' }).then(async r => {
+  demoAvailable = r.ok;
+  await listSources();
+  if (qp.get('src') === 'demo' && demoAvailable) { $('src').value = 'demo'; if (qp.has('autostart')) start(); }
+}, () => listSources());
+
 window.__live = { stats, get device() { return device; }, get display() { return display; }, get ring() { return ring; }, get faces() { return faces; }, get scored() { return scored; }, get engine() { return engine; }, get workers() { return workers.length; } };
