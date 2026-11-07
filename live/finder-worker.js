@@ -14,16 +14,19 @@ async function init({ vendor, delegate, numFaces }) {
   importScripts(url);
   URL.revokeObjectURL(url);
   const fileset = { wasmLoaderPath: vendor + 'vision_wasm_internal.js', wasmBinaryPath: vendor + 'vision_wasm_internal.wasm' };
-  finder = await self.MPVision.FaceLandmarker.createFromOptions(fileset, {
-    canvas: new OffscreenCanvas(1, 1),
-    baseOptions: { modelAssetPath: vendor + 'face_landmarker.task', delegate }, runningMode: 'VIDEO', numFaces,
+  const make = d => self.MPVision.FaceLandmarker.createFromOptions(fileset, {
+    ...(d === 'GPU' ? { canvas: new OffscreenCanvas(1, 1) } : {}),
+    baseOptions: { modelAssetPath: vendor + 'face_landmarker.task', delegate: d }, runningMode: 'VIDEO', numFaces,
     minFaceDetectionConfidence: 0.5, minFacePresenceConfidence: 0.6, minTrackingConfidence: 0.6,
   });
+  // WebGL where it works, else MediaPipe's CPU (WASM) path.
+  try { finder = await make(delegate); self.delegate = delegate; }
+  catch (err) { if (delegate === 'CPU') throw err; finder = await make('CPU'); self.delegate = 'CPU'; }
 }
 
 self.onmessage = async ({ data }) => {
   if (data.type === 'init') {
-    try { await init(data); postMessage({ type: 'ready' }); }
+    try { await init(data); postMessage({ type: 'ready', delegate: self.delegate }); }
     catch (err) { postMessage({ type: 'error', message: String(err?.message || err) }); }
     return;
   }

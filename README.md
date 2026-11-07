@@ -11,8 +11,10 @@ with TikTok.
 
 Everything runs in your browser, on your GPU. Nothing is uploaded.
 
-It needs WebGPU: current Chrome/Edge on desktop and Android, Safari 26+. On Linux Chrome enable
-`chrome://flags/#enable-unsafe-webgpu` (and Vulkan).
+With WebGPU (current Chrome/Edge on desktop and many Android devices, Safari 26+; on Linux Chrome enable
+`chrome://flags/#enable-unsafe-webgpu` and Vulkan) everything runs on the GPU. Without it the app switches to a
+**CPU version**: MediaPipe finds faces (on WebGL where available) and the TikTok nets run in a Rust/WebAssembly SIMD
+engine, still bit-exact.
 
 ## What's here
 
@@ -28,7 +30,8 @@ It needs WebGPU: current Chrome/Edge on desktop and Android, Safari 26+. On Linu
 ## Run locally
 
 ```sh
-nix develop                  # node, python, chromium
+nix develop                  # node, python, chromium, rust
+./tools/build-wasm.sh        # the CPU engine -> live/cpu/tiktok_cpu.wasm
 python3 tools/serve.py 8766  # static server with caching off
 # open http://127.0.0.1:8766/live/
 ```
@@ -86,6 +89,24 @@ A small compiler from op graphs to fused WGSL compute kernels (`graph.js`, `fuse
 On a Radeon 860M with one face, GPU time per frame is about 0.3 ms (face detector), 1.2 ms (landmarks) and 1.3 ms
 (both TikTok nets): roughly 4.75 ms per frame, or about 200 frames per second of headroom. A camera usually
 delivers 30–60. The original JS engine takes about 200 ms for the two TikTok nets alone.
+
+### The CPU version (`wasm/`, `live/cpu/`)
+
+For browsers without WebGPU. The TikTok nets run in a small Rust engine compiled to WebAssembly with SIMD128, one
+worker per net:
+
+- Same fixed-point semantics, **bit-identical** to the reference (`node tools/test-wasm.mjs`, which compares
+  against the original engine from `tools/fetch-upstream.sh`).
+- Channel-pair interleaved int16 tensors, so a SIMD load is 4 pixels × 2 channels, the exact operand shape of
+  `i32x4.dot_i16x8_s`. 1×1 convs do 4 output channels × 8 pixels per step, and int16 saturation comes free from
+  `i16x8.narrow_i32x4_s`. First convs use im2col dot products, and depthwise convs run on zero-bordered planes
+  with widening multiplies.
+- The program (shapes, ops, weights) is built in JS from the same parsed graph and fully validated in Rust before
+  anything runs.
+- On the dev laptop: 3.8 ms (expnet) and 9.0 ms (agenet) per face, against 72 ms and 150 ms for the reference JS.
+
+Faces come from MediaPipe's FaceLandmarker in a worker (WebGL, or its CPU path), and the crops are the original's
+canvas crop. GitHub Actions builds the WASM and deploys the site.
 
 ### The face finder
 

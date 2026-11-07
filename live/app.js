@@ -33,6 +33,9 @@ const stats = { cam: new Rate(), det: new Rate(), net: new Rate(), detMs: new Av
 
 let device, engine, display, ring = [], workers = [], mainFinder = null, stream = null, reader = null, running = false;
 let finder, tiktok, gpuFrame, readRing = [], specs, tuned = null, adapterInfo;
+// CPU backend (no WebGPU): MediaPipe workers find faces, two WebAssembly workers run the nets.
+let backend = 'webgpu', ready = false, view2d = null, netWorkers = [], netsBusy = false, finderDelegate = null;
+const cpuPending = new Map();
 let faces = [], facesId = -1, scored = [], scoredId = -1, frameId = 0, slotNext = 0, lastTs = -1;
 
 // Same landmark picks and sanity filter as upstream face.js. pts is [x0, y0, x1, y1, ...] normalized.
@@ -55,7 +58,7 @@ function startWorker() {
     const w = new Worker('finder-worker.js');
     w.busy = false;
     w.onmessage = ({ data }) => {
-      if (data.type === 'ready') resolve(w);
+      if (data.type === 'ready') { finderDelegate = data.delegate; resolve(w); }
       else if (data.type === 'error') reject(new Error(data.message));
       else if (data.type === 'result') { w.busy = false; onLandmarks(data); }
     };
@@ -78,6 +81,7 @@ async function setWorkers(n) {
         minFaceDetectionConfidence: 0.5, minFacePresenceConfidence: 0.6, minTrackingConfidence: 0.6 });
     }
   }
+  if (backend === 'cpu') { $('finder').textContent = `MediaPipe (${finderDelegate === 'GPU' ? 'WebGL' : 'CPU'}), ${workers.length || 'main thread'} worker${workers.length === 1 ? '' : 's'}`; return; }
   // Each in-flight detection pins a ring slot; two spare slots keep the GPU from reading a slot being refilled.
   ring.forEach(f => f.tex?.destroy());
   ring = Array.from({ length: Math.max(1, workers.length) + 4 }, () => Object.assign(new FrameTexture(device), { pins: 0 }));
@@ -148,6 +152,90 @@ async function init() {
   const k = finder.det.kernelCount + finder.lm.kernelCount + tiktok.kernelCount + 2, d = finder.det.dispatches + finder.lm.dispatches + tiktok.dispatches + 4;
   $('engine').textContent = `${adapterInfo.vendor} ${adapterInfo.architecture} · face detector + landmarks + both TikTok nets: ${k} kernels, ${d} dispatches per frame, one submit · ${planLabel} · TikTok nets bit-exact int16 fixed point`;
   await setMode();
+}
+
+function startNetWorker(name) {
+  return new Promise((resolve, reject) => {
+    const w = new Worker('cpu/nets-worker.js', { type: 'module' });
+    const waiting = new Map();
+    let next = 0;
+    w.onmessage = ({ data }) => {
+      if (data.type === 'ready') resolve(w);
+      else if (data.type === 'result') { waiting.get(data.id)?.resolve(data); waiting.delete(data.id); }
+      else if (data.type === 'error') { if (waiting.has(data.id)) { waiting.get(data.id).reject(new Error(data.message)); waiting.delete(data.id); } else reject(new Error(data.message)); }
+    };
+    w.onerror = e => reject(new Error(e.message || 'net worker failed'));
+    w.run = inputs => new Promise((res, rej) => { const id = next++; waiting.set(id, { resolve: res, reject: rej }); w.postMessage({ type: 'run', id, inputs }, inputs.map(t => t.buffer)); });
+    w.postMessage({ type: 'init', wasm: new URL('cpu/tiktok_cpu.wasm', location.href).href, spec: new URL(NETS + name + '.json', location.href).href, bin: new URL(NETS + name + '.bin', location.href).href, wanted: WANT[name] });
+  });
+}
+
+async function initCpu(reason) {
+  backend = 'cpu';
+  say(`${reason} Starting the CPU version…`);
+  view2d = view.getContext('2d');
+  $('finderMode').value = 'mediapipe'; $('finderMode').disabled = true; $('workersLabel').hidden = false;
+  if (!qp.has('workers')) $('workers').value = '1'; // phones: one MediaPipe instance next to the two net workers
+  [netWorkers] = await Promise.all([Promise.all(['expnet', 'agenet'].map(startNetWorker)), setWorkers(+$('workers').value)]);
+  $('engine').textContent = `CPU version (${reason.replace(/[.:]$/, '')}) · faces: MediaPipe on ${finderDelegate === 'GPU' ? 'WebGL' : 'the CPU'} · TikTok nets: Rust/WebAssembly SIMD, bit-exact int16 fixed point, one worker per net`;
+}
+
+// The original tool's crop: similarity transform putting eye and mouth midpoints on the template; BGR - 128, HWC.
+const cropCanvases = {};
+function cropTensor(src, t, e, m) {
+  const c = cropCanvases[t.S] ??= new OffscreenCanvas(t.S, t.S), x = c.getContext('2d', { willReadFrequently: true });
+  const f = transform(t, e, m), h = 0.5;
+  x.setTransform(1, 0, 0, 1, 0, 0); x.fillStyle = '#000'; x.fillRect(0, 0, t.S, t.S);
+  x.imageSmoothingEnabled = true; x.imageSmoothingQuality = 'low';
+  x.setTransform(f.re, f.im, -f.im, f.re, f.tx + h - (f.re - f.im) * h, f.ty + h - (f.im + f.re) * h);
+  x.drawImage(src, 0, 0);
+  const d = x.getImageData(0, 0, t.S, t.S).data, o = new Int16Array(t.S * t.S * 3);
+  for (let i = 0; i < t.S * t.S; i++) { o[i * 3] = d[i * 4 + 2] - 128; o[i * 3 + 1] = d[i * 4 + 1] - 128; o[i * 3 + 2] = d[i * 4] - 128; }
+  return o;
+}
+
+function onFrameCpu(frame, w, h, tsUs, now) {
+  view2d.save();
+  if ($('mirror').checked) view2d.setTransform(-1, 0, 0, 1, w, 0);
+  view2d.drawImage(frame, 0, 0, w, h);
+  view2d.restore();
+  const wk = workers.find(x => !x.busy);
+  if (!wk) return;
+  const ts = Math.max(lastTs + 1, Math.round(tsUs / 1000)); lastTs = ts;
+  const id = ++frameId;
+  wk.busy = true;
+  // Keep one bitmap for cropping once the landmarks come back; send a copy to the worker.
+  createImageBitmap(frame).then(async keep => {
+    const sent = await createImageBitmap(keep);
+    cpuPending.set(id, { bmp: keep, w, h, t: now });
+    wk.postMessage({ type: 'frame', id, ts, bitmap: sent }, [sent]);
+  }).catch(() => { wk.busy = false; });
+}
+
+function onLandmarksCpu({ id, faces: raw, ms }) {
+  const p = cpuPending.get(id);
+  cpuPending.delete(id);
+  if (!p) return;
+  const now = performance.now();
+  stats.det.tick(now); stats.detMs.add(ms);
+  if (id < facesId) { p.bmp.close(); return; }
+  const found = raw.map(a => faceFrom(a, p.w, p.h)).filter(believable).sort((a, b) => b.span - a.span).slice(0, +$('faces').value);
+  faces = found; facesId = id;
+  if (!found.length) graphs.push(now, null);
+  if (!found.length || netsBusy) { p.bmp.close(); return; }
+  netsBusy = true;
+  const ex = found.map(f => cropTensor(p.bmp, EXP, f.e, f.m)), ag = found.map(f => cropTensor(p.bmp, AGE, f.e, f.m));
+  p.bmp.close();
+  const t1 = performance.now();
+  Promise.all([netWorkers[0].run(ex), netWorkers[1].run(ag)]).then(([E, A]) => {
+    const t = performance.now();
+    stats.gpuMs.add(t - t1); stats.e2e.add(t - p.t); stats.net.tick(t);
+    stats.cpuNetMs = [E.ms, A.ms];
+    if (id < scoredId) return;
+    scoredId = id;
+    scored = found.map((f, i) => ({ ...expScores(E.out[i]), ...ageScores(A.out[i]), e: f.e, m: f.m }));
+    graphs.push(t, scored[0]);
+  }).catch(err => console.error(err)).finally(() => { netsBusy = false; });
 }
 
 async function setMode() {
@@ -229,6 +317,7 @@ function onFrame(frame, w, h, tsUs) {
   const now = performance.now();
   stats.cam.tick(now);
   resize(w, h);
+  if (backend === 'cpu') { onFrameCpu(frame, w, h, tsUs, now); draw(w, h, frame); return; }
   if ($('finderMode').value === 'gpu') { onFrameGpu(frame, w, h, now); draw(w, h, frame); return; }
   const ts = Math.max(lastTs + 1, Math.round(tsUs / 1000)); lastTs = ts;
   const id = ++frameId;
@@ -293,7 +382,9 @@ function onFrameGpu(frame, w, h, now) {
   }, () => { slot.busy = false; });
 }
 
-function onLandmarks({ id, faces: raw, ms }) {
+function onLandmarks(data) {
+  if (backend === 'cpu') return onLandmarksCpu(data);
+  const { id, faces: raw, ms } = data;
   const p = pending.get(id);
   pending.delete(id);
   if (!p) return;
@@ -399,7 +490,18 @@ function hud() {
 async function start() {
   $('start').disabled = true;
   try {
-    if (!engine) await init();
+    if (!ready) {
+      const noGpu = !navigator.gpu ? 'This browser has no WebGPU.' : qp.get('backend') === 'cpu' ? 'CPU version requested.' : null;
+      if (noGpu) await initCpu(noGpu);
+      else {
+        try { await init(); }
+        catch (err) {
+          console.warn('WebGPU path unavailable, using the CPU version', err);
+          await initCpu(/adapter/i.test(err.message) ? 'No WebGPU adapter on this device.' : `WebGPU failed (${err.message}).`);
+        }
+      }
+      ready = true;
+    }
     say('Opening camera…');
     await openCamera();
     stage.dataset.state = 'live'; $('hud').hidden = false; $('graphs').hidden = !$('showGraphs').checked;
@@ -421,7 +523,7 @@ function diagnostics() {
     webgpu: !!navigator.gpu, adapter: adapterInfo ? { vendor: adapterInfo.vendor, architecture: adapterInfo.architecture, device: adapterInfo.device, description: adapterInfo.description } : null,
     features: device ? [...device.features].sort() : null,
     limits: L ? { maxComputeWorkgroupStorageSize: L.maxComputeWorkgroupStorageSize, maxComputeInvocationsPerWorkgroup: L.maxComputeInvocationsPerWorkgroup, maxStorageBufferBindingSize: L.maxStorageBufferBindingSize, maxStorageBuffersPerShaderStage: L.maxStorageBuffersPerShaderStage } : null,
-    plan: planLabel, tuneMs: tuned?.tuneMs ?? null, tuneTimer: tuned?.timer ?? null, planTotalsUs: tuned?.totalUs ?? null,
+    backend, finderDelegate, cpuNetMs: stats.cpuNetMs ?? null, plan: backend === 'cpu' ? null : planLabel, tuneMs: tuned?.tuneMs ?? null, tuneTimer: tuned?.timer ?? null, planTotalsUs: tuned?.totalUs ?? null,
     kernels: ff ? { detector: [ff.det.kernelCount, ff.det.dispatches], landmarks: [ff.lm.kernelCount, ff.lm.dispatches], tiktok: tiktok && [tiktok.kernelCount, tiktok.dispatches], compileMs: Math.round(ff.det.compileMs + ff.lm.compileMs + (tiktok?.compileMs || 0)) } : null,
     source: $('src').value, finderMode: $('finderMode').value, frame: [overlay.width, overlay.height], facesNow: faces.length,
     frameReader: typeof MediaStreamTrackProcessor === 'function' && !qp.has('video') ? 'MediaStreamTrackProcessor' : 'video',
@@ -439,12 +541,12 @@ for (const id of ['res', 'src']) $(id).addEventListener('change', () => {
   if (id === 'src') $('mirror').checked = $('src').value !== 'back';
   if (running) openCamera().catch(err => say(String(err)));
 });
-$('workers').addEventListener('change', () => { if (engine && $('finderMode').value === 'mediapipe') setWorkers(+$('workers').value); });
-$('finderMode').addEventListener('change', () => { if (finder) setMode().catch(err => say(String(err))); });
+$('workers').addEventListener('change', () => { if ((engine || backend === 'cpu') && $('finderMode').value === 'mediapipe') setWorkers(+$('workers').value); });
+$('finderMode').addEventListener('change', () => { if (finder && backend !== 'cpu') setMode().catch(err => say(String(err))); });
 $('showGraphs').addEventListener('change', () => { if (running) $('graphs').hidden = !$('showGraphs').checked; });
 // ?src=demo&workers=2&res=1280x720&faces=1&autostart=1 (handy for benchmarking)
 for (const k of ['src', 'workers', 'res', 'faces', 'finderMode']) if (qp.has(k)) $(k).value = qp.get(k);
 if (qp.has('autostart') && $('src').value === 'demo') start();
 fetch(SAMPLE, { method: 'HEAD' }).then(r => { if (!r.ok) throw 0; }).catch(() => $('src').querySelector('[value=demo]').remove());
-if (!navigator.gpu) say('This needs WebGPU. On Linux Chrome, enable chrome://flags/#enable-unsafe-webgpu (and Vulkan).');
+if (!navigator.gpu) say('No WebGPU in this browser: the CPU version will run (slower).');
 window.__live = { stats, get device() { return device; }, get display() { return display; }, get ring() { return ring; }, get faces() { return faces; }, get scored() { return scored; }, get engine() { return engine; }, get workers() { return workers.length; } };

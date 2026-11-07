@@ -7,7 +7,7 @@
       forAll = f: nixpkgs.lib.genAttrs systems (s: f nixpkgs.legacyPackages.${s});
     in {
       devShells = forAll (pkgs: {
-        default = pkgs.mkShell { packages = [ pkgs.nodejs pkgs.python3 pkgs.chromium ]; };
+        default = pkgs.mkShell { packages = [ pkgs.nodejs pkgs.python3 pkgs.chromium pkgs.rustc pkgs.cargo pkgs.lld pkgs.clippy ]; };
       });
     };
 }
