@@ -266,7 +266,7 @@ function onLandmarksCpu({ id, faces: raw, ms }) {
     stats.cpuNetMs = [E.ms, A.ms];
     if (id < scoredId) return;
     scoredId = id;
-    scored = found.map((f, i) => ({ ...expScores(E.out[i]), ...ageScores(A.out[i]), e: f.e, m: f.m }));
+    scored = smooth(found.map((f, i) => ({ ...expScores(E.out[i]), ...ageScores(A.out[i]), e: f.e, m: f.m })), t);
     graphs.push(t, scored[0]);
   }).catch(err => console.error(err)).finally(() => { netsBusy = false; });
 }
@@ -390,12 +390,27 @@ function onFrameGpu(frame, w, h, now) {
       return { ...f, pts, span: Math.hypot(f.m[0] - f.e[0], f.m[1] - f.e[1]) };
     }).sort((a, b) => b.span - a.span);
     faces = found;
-    scored = found.filter(f => f.slot >= 0).map(f => ({ ...expScores(runTail(tiktok.nets[0], specs[0].buf, sums, f.slot)), ...ageScores(runTail(tiktok.nets[1], specs[1].buf, sums, f.slot)), e: f.e, m: f.m }));
+    scored = smooth(found.filter(f => f.slot >= 0).map(f => ({ ...expScores(runTail(tiktok.nets[0], specs[0].buf, sums, f.slot)), ...ageScores(runTail(tiktok.nets[1], specs[1].buf, sums, f.slot)), e: f.e, m: f.m })), t);
     graphs.push(t, scored.find(s => s.e === found[0]?.e) ?? null);
   }, () => { slot.busy = false; });
 }
 
 const onLandmarks = data => onLandmarksCpu(data);
+
+// Optional smoothing of the scores (one tracked face): exponential moving average with a ~1 s time constant, so it
+// behaves the same at any frame rate; reset when the face has been gone for a while.
+const SMOOTH_TAU = 1000, SMOOTH_GAP = 1500;
+let smoothed = null;
+function smooth(list, t) {
+  if (!$('smooth').checked || !list.length) { smoothed = null; return list; }
+  const x = list[0];
+  if (!smoothed || t - smoothed.t > SMOOTH_GAP) { smoothed = { ...x, exp: [...x.exp], t }; return [{ ...smoothed }, ...list.slice(1)]; }
+  const a = 1 - Math.exp(-(t - smoothed.t) / SMOOTH_TAU), mix = (p, q) => p + a * (q - p);
+  for (const k of ['attractiveRaw', 'attractive', 'valence', 'arousal', 'age', 'boy']) smoothed[k] = mix(smoothed[k], x[k]);
+  smoothed.exp = smoothed.exp.map((v, i) => mix(v, x.exp[i]));
+  Object.assign(smoothed, { e: x.e, m: x.m, t });
+  return [{ ...smoothed }, ...list.slice(1)];
+}
 
 // Pair each visible face with the nearest scored face from the latest finished submit.
 function match(f) {
@@ -423,12 +438,15 @@ function draw(w, h, src) {
       lines.push([ok ? s.attractive.toFixed(1) : '–', ok ? 'Attractiveness' : 'No score under 16', ok ? { f: s.attractive / 100, color: '254,44,85' } : null]);
       lines.push([`${Math.round(s.age)}`, 'Age guess', { f: s.age / 100, color: '37,244,238' }]);
       lines.push([`${male ? 'Male' : 'Female'} ${Math.round(100 * (male ? s.boy : 1 - s.boy))}%`, 'Gender guess', { f: s.boy, color: genderColor(s.boy), mid: true }]);
-      lines.push([`${top[0]} ${Math.round(top[1] * 100)}%`, 'Mood']);
+      lines.push([`${top[0]} ${Math.round(top[1] * 100)}%`, 'Mood', { stack: s.exp }]);
     } else lines.push(['…', 'Scoring']);
     drawCard(bx, y1 + 8 * k, Math.max(bw, 190 * k), lines, k);
     if ($('crops').checked) drawCrops(f, i, w, h, k, src);
   });
 }
+
+// Mood colours for the card (dark surface): the graphs' validated dark-mode categorical slots, same order.
+const MOOD_RGB = ['57,135,229', '217,89,38', '25,158,112', '201,133,0', '213,81,129', '0,131,0', '144,133,233'];
 
 // P(male) -> colour: pink at 0 through to blue at 1 (linear in RGB), as "r,g,b".
 function genderColor(p) {
@@ -445,10 +463,16 @@ function drawCard(x, y, W, lines, k) {
     const yy = y + pad + (i + 0.75) * lh;
     if (bar) {
       // Value bar under the row: track, fill to the value (0..1), optional midpoint tick.
-      const bx = x + pad * 0.5, bw = W - pad, by = y + pad + i * lh + 3 * k, bh = lh - 6 * k, f = Math.min(1, Math.max(0, bar.f));
+      const bx = x + pad * 0.5, bw = W - pad, by = y + pad + i * lh + 3 * k, bh = lh - 6 * k, f = Math.min(1, Math.max(0, bar.f ?? 0));
       ctx.fillStyle = 'rgba(255,255,255,.06)';
       ctx.beginPath(); ctx.roundRect(bx, by, bw, bh, 5 * k); ctx.fill();
-      if (f > 0) { ctx.fillStyle = `rgba(${bar.color},.38)`; ctx.beginPath(); ctx.roundRect(bx, by, Math.max(bw * f, 6 * k), bh, 5 * k); ctx.fill(); }
+      if (bar.stack) {
+        // The mood distribution as one stacked bar, same colours and order as the mood graph.
+        ctx.save(); ctx.beginPath(); ctx.roundRect(bx, by, bw, bh, 5 * k); ctx.clip();
+        let at = bx;
+        bar.stack.forEach((p, j) => { const sw = bw * p; ctx.fillStyle = `rgba(${MOOD_RGB[j]},.6)`; ctx.fillRect(at, by, Math.max(0, sw - k), bh); at += sw; });
+        ctx.restore();
+      } else if (f > 0) { ctx.fillStyle = `rgba(${bar.color},.38)`; ctx.beginPath(); ctx.roundRect(bx, by, Math.max(bw * f, 6 * k), bh, 5 * k); ctx.fill(); }
       if (bar.mid) { ctx.fillStyle = 'rgba(255,255,255,.35)'; ctx.fillRect(bx + bw / 2 - 0.75 * k, by + 2 * k, 1.5 * k, bh - 4 * k); }
     }
     ctx.fillStyle = i === 0 && !bar ? '#fe2c55' : i === 0 ? '#fff' : '#f1efe9'; // on its red bar the score reads in white
