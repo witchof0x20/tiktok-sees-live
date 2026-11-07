@@ -1,85 +1,115 @@
 # What TikTok sees, live
 
-A local copy of [ayoships.com/tools/tiktok-face](https://ayoships.com/tools/tiktok-face) plus a live webcam
-version that runs TikTok's two decoded face networks (`expnet`: attractiveness/mood, `agenet`: age/gender) on a
-from-scratch WebGPU engine. Everything runs in the browser, on your device.
+**[Open the live app →](https://witchof0x20.github.io/tiktok-sees-live/)**
 
-- `upstream/` – the original tool, mirrored with its original paths (`/upstream/tools/tiktok-face/`).
-- `live/` – the live app (`/live/`) and the GPU engine (`live/gpu/`).
-- `live/models/` – the face detector and landmark models converted from MediaPipe's `face_landmarker.task`.
-- `live/test/` – bit-exactness check, face model and face finder checks, crop fidelity check, benchmarks, autotuner.
+A live webcam version of **[What TikTok sees](https://ayoships.com/tools/tiktok-face)** by
+[Ayo](https://ayoships.com), who decoded the face networks TikTok runs on-device and built the original tool:
+upload a photo, see the attractiveness score, age and gender guesses and mood TikTok's model assigns. All credit for
+finding, decoding and explaining those networks goes to that project. This repo takes the same two networks
+(`expnet`: attractiveness and mood, `agenet`: age and gender) and runs them on every camera frame. Not affiliated
+with TikTok.
+
+Everything runs in your browser, on your GPU. Nothing is uploaded.
+
+It needs WebGPU: current Chrome/Edge on desktop and Android, Safari 26+. On Linux Chrome enable
+`chrome://flags/#enable-unsafe-webgpu` (and Vulkan).
+
+## What's here
+
+- `live/` – the app, and `live/gpu/`, the engine it runs on.
+- `live/nets/` – the decoded TikTok network weights, as published by the original tool.
+- `live/models/` – MediaPipe's face detector and landmark models, converted for the engine (from
+  `live/vendor/face_landmarker.task`, Apache-2.0).
+- `live/vendor/` – MediaPipe Tasks Vision (Apache-2.0), used only by the optional "MediaPipe workers" comparison mode.
+- `live/tuned/` – autotuned kernel plans.
+- `live/test/` – correctness checks, benchmarks and the autotuner.
 - `tools/` – TFLite converter, graph/bounds analysis, headless Chromium driver, dev server.
 
-## Run
-
-Camera frames are read with `MediaStreamTrackProcessor` and drawn with WebGPU rather than through a `<video>`
-element, which shows blank frames on some Linux/Vulkan Chrome setups.
+## Run locally
 
 ```sh
-nix develop            # node, python, chromium
-python3 tools/serve.py 8766   # static server with caching off
+nix develop                  # node, python, chromium
+python3 tools/serve.py 8766  # static server with caching off
 # open http://127.0.0.1:8766/live/
 ```
 
-WebGPU on Linux Chrome needs `chrome://flags/#enable-unsafe-webgpu` (and Vulkan).
+The original tool isn't redistributed here. `tools/fetch-upstream.sh` downloads it into `upstream/` (git-ignored)
+so you can run it locally at `/upstream/tools/tiktok-face/`. Some checks (`verify.html`, `crop.html`,
+`facefinder.html`, `bench-pipeline.html`) compare against its reference engine and sample photo and need it.
+With it present, the app also gets a "Demo (sample photo)" source.
 
-## The engine
+## How it works
 
-The upstream reference engine (`engine.js`) emulates the nets' 16-bit fixed-point arithmetic in plain JS:
-round-half-up rescales, int16 saturation, ReLU. The GPU engine reproduces it **bit for bit**: every output float
-matches the reference exactly (`live/test/verify.html`). No quantization or approximation is introduced.
+Per camera frame, everything below is **one GPU submit with one readback**:
 
-How it gets fast:
+frame → texture + mips → face detector → NMS / face regions → face landmarks (one batch item per face) →
+crop parameters → both TikTok nets (one batch item per face) → readback → preview and overlay.
 
-- **Exact integer math, proven safe.** Interval analysis over all weights shows every conv accumulator stays
-  below 2^29.8 for *any* input, so i32 accumulation is exact (`tools/bounds.mjs`).
-- **Full-rate 24-bit multiplies.** RDNA's 32-bit integer multiply is quarter rate. Operands are shifted into
-  unsigned range (x+32768 < 2^16, w+2048 < 2^12) so the compiler can emit `v_mad_u32_u24`, then the offsets are
-  removed algebraically (Σxw = Σx'w' − 2048Σx' − 32768Σw' + K·2^26, mod 2^32), with the weight term folded into
-  the bias. Still bit-exact.
-- **Fusion compiler** (`fuse.js`, `codegen.js`). Ops are grouped into kernels. Within a kernel, convs that feed
-  spatial ops are staged in workgroup memory with halos; convs that only feed pointwise ops, plus all
-  adds/concats, are recomputed in registers (concat is free, residual adds are epilogues). Global average pooling
-  is fused as workgroup + global atomics. Kernels at the same depth, across branches *and* both nets, share one
-  dispatch (horizontal fusion). Dead outputs (`predict_happy`) are pruned.
-- **Register-blocked micro-kernels.** Each thread computes a Q-channel-group × P-pixel tile, so input loads are
-  reused across output channels and weight loads across pixels. Depthwise rows slide over shared loads.
-- **Two schedules.** `unit` spreads (channel, pixel) blocks over lanes. `px` makes channel loops
-  workgroup-uniform so weights are fetched with scalar loads.
-- **Autotuner** (`tune.js`, `live/test/tune.html`). Greedy fusion and per-kernel (tile, split, P, Q, schedule)
-  choices driven by GPU timestamp measurements, saved to `live/tuned/<arch>.json` and loaded at runtime.
-  Without a tuning file, a heuristic cost model is used.
-- **Everything in one submit, no CPU round trips.** Per camera frame: upload → mips → face detector → NMS/ROIs →
-  face landmarks (one batch item per face) → crop parameters → both TikTok nets (one batch item per face) →
-  one readback. Face counts never come back to the CPU mid-frame: post-processing kernels write them to GPU
-  buffers, and later stages size themselves with indirect dispatch. Crops are fused into each net's first conv,
-  which samples the video texture directly. The small fc/softmax tail runs on the CPU with the reference's exact
-  float code. Up to three frames are in flight.
+Face counts never come back to the CPU mid-frame. Post-processing kernels write them to GPU buffers, and later
+stages size themselves with indirect dispatch. Camera frames are read with `MediaStreamTrackProcessor` (a
+`<video>` fallback where that's missing) and drawn with WebGPU.
 
-## The face finder (`live/gpu/facefinder.js`)
+### The TikTok nets: bit-exact
 
-A re-implementation of MediaPipe's FaceLandmarker on the same engine; MediaPipe itself is no longer in the loop.
-`tools/convert_tflite.py` (with a small, bounds-checked flatbuffer reader in `tools/tflite.py`) converts the
-BlazeFace short-range detector and the FaceMesh v2 landmark model out of `face_landmarker.task` into the engine's
-float graph format offline, so the browser never parses TFLite. float16 weights are widened to f32 losslessly;
-inference is f32, matching a CPU reference interpreter to ~1e-6 relative (`live/test/verify-face.html`).
+The original tool's engine emulates the nets' 16-bit fixed-point arithmetic in plain JS: round-half-up rescales,
+int16 saturation, ReLU. The GPU engine reproduces it **bit for bit**: every output matches the reference exactly
+(`live/test/verify.html`). No quantization or approximation is introduced.
 
-The graph logic around the models is ported to two WGSL kernels:
-- **detPost**: decodes the 896 SSD anchors, applies weighted NMS, removes the letterbox, builds rotated ROIs (eye
-  keypoints, square long side, ×1.5) and merges them with ROIs tracked from the previous frame's landmarks.
-- **lmPost**: presence score, projects the 478 landmarks back to the frame, computes next frame's tracking ROIs,
-  and derives upstream's eye/mouth points and sanity filter plus the TikTok crop parameters.
+- **Exact integer math, proven safe.** Interval analysis over all weights shows every conv accumulator stays below
+  2^29.8 for *any* input, so i32 accumulation is exact (`tools/bounds.mjs`).
+- **Full-rate 24-bit multiplies.** 32-bit integer multiply is quarter rate on RDNA. Operands are shifted into
+  unsigned range (x+32768 < 2^16, w+2048 < 2^12) so the compiler emits `v_mad_u32_u24`, then the offsets are
+  removed algebraically (Σxw = Σx'w' − 2048Σx' − 32768Σw' + K·2^26, mod 2^32), with the weight term folded into the
+  bias.
+- The crop (eye/mouth similarity transform, like the original's `drawCrop`) is fused into each net's first conv,
+  which samples the video texture directly. Against the original's canvas crop, scores differ by at most 0.34
+  (attractiveness) / 0.8 years (`live/test/crop.html`).
 
-Against MediaPipe on the same frames, landmarks agree to ~0.4–0.5% of the eye distance (`live/test/facefinder.html`).
-The MediaPipe path is still available in the app (Face finder → MediaPipe workers) for comparison.
+### The engine
 
-## Tuning
+A small compiler from op graphs to fused WGSL compute kernels (`graph.js`, `fuse.js`, `codegen.js`, `engine.js`):
+
+- **Fusion.** Ops are grouped into kernels. Within a kernel, convs that feed spatial ops are staged in workgroup
+  memory with halos, while pointwise ops and convs feeding only pointwise ops are recomputed in registers (concat is
+  free, residual adds and activations are epilogues). Global average pooling is fused as workgroup + global atomics.
+  Independent kernels at the same depth share one dispatch (horizontal fusion).
+- **Register-blocked micro-kernels.** Each thread computes a Q-channel-group × P-pixel tile, and depthwise rows slide
+  over shared loads. Two schedules: lanes over blocks, or workgroup-uniform channel loops so weights become scalar
+  loads.
+- **Fixed-point and float graphs.** NC4HW4 layout, int16 values or f32 bit patterns in the same buffers.
+- **Autotuning** (`tune.js`). Fusion groups and per-kernel tile/split/block/schedule choices are made from GPU
+  timestamp measurements. The full tune takes minutes and is bundled for AMD RDNA3 (`live/tuned/rdna-3.json`).
+  On any other GPU, the app runs a **quick tune** once (a few seconds on a desktop GPU; skippable). It keeps the
+  bundled plan's fusion groups, re-picks each group's parameters on your device, splits groups that don't fit
+  your GPU, and caches the result in `localStorage`. Without a plan it uses one op per kernel.
+
+On a Radeon 860M with one face, GPU time per frame is about 0.3 ms (face detector), 1.2 ms (landmarks) and 1.3 ms
+(both TikTok nets): roughly 4.75 ms per frame, or about 200 frames per second of headroom. A camera usually
+delivers 30–60. The original JS engine takes about 200 ms for the two TikTok nets alone.
+
+### The face finder
+
+The original tool finds faces with MediaPipe's FaceLandmarker. Here it is re-implemented on the same engine
+(`live/gpu/facefinder.js`):
+
+- `tools/convert_tflite.py` (with a small, bounds-checked flatbuffer reader in `tools/tflite.py`) converts the
+  BlazeFace short-range detector and FaceMesh v2 landmark model offline, so the browser never parses TFLite.
+  float16 weights are widened to f32 losslessly, and inference matches a CPU reference to ~1e-6 relative
+  (`live/test/verify-face.html`).
+- **detPost** decodes the 896 SSD anchors, applies weighted NMS, removes the letterbox, builds rotated face regions
+  (eye keypoints, square, ×1.5) and merges them with regions tracked from the previous frame's landmarks.
+- **lmPost** computes presence, projects the 478 landmarks back to the frame, derives next frame's tracking regions,
+  and computes the original tool's eye/mouth points and sanity filter plus the TikTok crop parameters.
+
+Landmarks agree with MediaPipe's to ~0.4–0.5% of the eye distance (`live/test/facefinder.html`).
+
+## Tuning a new GPU fully
 
 ```sh
 # stable clocks give stable timings (AMD):
 echo high | sudo tee /sys/class/drm/card1/device/power_dpm_force_performance_level
 node tools/cdp.mjs "http://127.0.0.1:8766/live/test/tune.html?k=16" "window.__tune && JSON.stringify(window.__tune)" 3000000 > tiktok.json
 node tools/cdp.mjs "http://127.0.0.1:8766/live/test/tune.html?k=16&nets=face" "window.__tune && JSON.stringify(window.__tune)" 3000000 > face.json
-# merge the two "nets" maps into live/tuned/<architecture>.json
+python3 tools/merge_tuned.py live/tuned/<architecture>.json tiktok.json face.json
 echo auto | sudo tee /sys/class/drm/card1/device/power_dpm_force_performance_level
 ```
