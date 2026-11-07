@@ -41,3 +41,33 @@ select { font: inherit; color: var(--fg); background: var(--card); border: 1px s
   .hud { grid-template-columns: repeat(2, 1fr); }
   .stage { aspect-ratio: 3 / 4; }
 }
+
+/* Graphs: categorical slots validated for both modes (dataviz reference palette, slots 1-7). */
+.graphs {
+  --surface-1: #fcfcfb; --text-primary: #0b0b0b; --text-secondary: #52514e; --text-muted: #7a7974; --grid: #e6e4de;
+  --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100; --series-5: #e87ba4; --series-6: #008300; --series-7: #6250d6;
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 12px 0 0;
+}
+@media (prefers-color-scheme: dark) {
+  .graphs {
+    --surface-1: #1a1a19; --text-primary: #f0efec; --text-secondary: #c3c2b7; --text-muted: #8f8d85; --grid: #2e2d2a;
+    --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500; --series-5: #d55181; --series-6: #008300; --series-7: #9085e9;
+  }
+}
+.graphs[hidden] { display: none; }
+.chart { margin: 0; background: var(--surface-1); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px 8px; min-width: 0; }
+.chart.wide { grid-column: 1 / -1; }
+.chart figcaption { display: flex; justify-content: space-between; align-items: baseline; font-size: 13px; color: var(--text-secondary); }
+.chart figcaption .v { font: 600 16px/1.2 var(--mono); color: var(--text-primary); font-variant-numeric: tabular-nums; }
+.chart .plot { position: relative; }
+.chart canvas { display: block; width: 100%; height: 110px; margin-top: 6px; cursor: crosshair; }
+.chart.wide canvas { height: 140px; }
+.chart .tip { position: absolute; top: 4px; pointer-events: none; background: var(--surface-1); color: var(--text-primary); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; font-size: 12px; box-shadow: 0 4px 14px rgba(0,0,0,.18); white-space: nowrap; z-index: 1; }
+.chart .tip .h { color: var(--text-secondary); margin-bottom: 2px; }
+.chart .tip div:not(.h) { display: grid; grid-template-columns: 10px auto auto; gap: 6px; align-items: center; }
+.chart .tip i, .legend i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+.chart .tip b { text-align: right; font-variant-numeric: tabular-nums; }
+.legend { list-style: none; display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 8px 0 0; padding: 0; font-size: 12px; color: var(--text-secondary); }
+.legend li { display: inline-flex; align-items: center; gap: 6px; }
+.legend b { color: var(--text-primary); font: 600 12px var(--mono); font-variant-numeric: tabular-nums; min-width: 3.5ch; }
+@media (max-width: 640px) { .graphs { grid-template-columns: 1fr; } }

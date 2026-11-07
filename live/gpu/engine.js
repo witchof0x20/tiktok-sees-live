@@ -119,13 +119,14 @@ export async function createEngine(device, specs, { maxBatch = 4, source = 'tens
   const qRes = canTime ? buf(stages.length * 16, GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC) : null;
   const qRead = canTime ? buf(stages.length * 16, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST) : null;
 
-  let bindGroup = null, boundView = null;
+  const bindCache = new Map();
   const bind = view => {
-    if (bindGroup && boundView === view) return bindGroup;
+    if (bindCache.has(view)) return bindCache.get(view);
+    if (bindCache.size > 16) bindCache.clear();
     const e = [{ binding: 0, resource: { buffer: wts } }, { binding: 1, resource: { buffer: act } }, { binding: 2, resource: { buffer: sums } }, { binding: 3, resource: { buffer: cfg } }];
     if (source === 'texture') e.push({ binding: 4, resource: view }, { binding: 5, resource: { buffer: crops } });
-    bindGroup = device.createBindGroup({ layout: bgl, entries: e });
-    boundView = view;
+    const bindGroup = device.createBindGroup({ layout: bgl, entries: e });
+    bindCache.set(view, bindGroup);
     return bindGroup;
   };
 

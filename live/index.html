@@ -24,6 +24,10 @@
     </div>
   </section>
   <section class="controls" aria-label="Options">
+    <label>Source <select id="src">
+      <option value="camera" selected>Camera</option>
+      <option value="demo">Demo (sample photo)</option>
+    </select></label>
     <label>Camera <select id="res">
       <option value="640x480">640×480</option>
       <option value="1280x720" selected>1280×720</option>
@@ -32,15 +36,24 @@
     <label>Faces <select id="faces">
       <option>1</option><option>2</option><option selected>4</option>
     </select></label>
+    <label>Finder workers <select id="workers">
+      <option>1</option><option>2</option><option selected>3</option><option>4</option>
+    </select></label>
     <label><input type="checkbox" id="mesh" checked> Landmarks</label>
     <label><input type="checkbox" id="crops" checked> Net inputs</label>
     <label><input type="checkbox" id="mirror" checked> Mirror</label>
+    <label><input type="checkbox" id="showGraphs" checked> Graphs</label>
   </section>
+  <section class="graphs" id="graphs" aria-label="Scores over the last 15 seconds, largest face" hidden></section>
   <section class="hud" id="hud" aria-label="Performance" hidden>
     <div><dt>Camera</dt><dd id="fpsCam">–</dd></div>
-    <div><dt>Face finder</dt><dd id="msDet">–</dd></div>
-    <div><dt>Nets (GPU)</dt><dd id="msNet">–</dd></div>
+    <div><dt>Faces found</dt><dd id="fpsDet">–</dd></div>
     <div><dt>Scored</dt><dd id="fpsNet">–</dd></div>
+    <div><dt>Capture → score</dt><dd id="msE2e">–</dd></div>
+    <div><dt>Face finder, per frame</dt><dd id="msDet">–</dd></div>
+    <div><dt>Nets, submit → result</dt><dd id="msNet">–</dd></div>
+    <div><dt>Face finder runs on</dt><dd id="finder">–</dd></div>
+    <div><dt>Max faces</dt><dd>4 per submit</dd></div>
     <div class="wide"><dt>Engine</dt><dd id="engine">–</dd></div>
   </section>
   <p class="foot">Based on <a href="/upstream/tools/tiktok-face/">ayoships.com/tools/tiktok-face</a> · not affiliated with TikTok</p>
